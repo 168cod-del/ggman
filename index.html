@@ -159,6 +159,8 @@
     font-size: 22px;
     color: var(--amber);
   }
+  /* 這顆按鈕只在「不在 Telegram App 內」(例如用電腦瀏覽器測試) 時才會顯示，
+     在 Telegram 內一律使用原生 MainButton 送出訂單，避免兩顆按鈕疊在一起在手機上點不到 */
   .confirm-btn{
     width: 100%;
     border: none;
@@ -177,6 +179,7 @@
     color: var(--chalk-dim);
     box-shadow:none;
   }
+  .confirm-btn.hidden{ display:none; }
 
   .empty-hint{
     text-align:center;
@@ -315,6 +318,9 @@
     tg?.HapticFeedback?.impactOccurred("light");
   }
 
+  // 是否真的在 Telegram App 內開啟（不是用一般電腦瀏覽器直接打開網址測試）
+  const isInTelegram = !!(tg && tg.initData && tg.initData.length > 0);
+
   function updateCartBar(){
     const ids = Object.keys(cart);
     const totalQty = ids.reduce((sum, id) => sum + cart[id], 0);
@@ -326,15 +332,30 @@
 
     const confirmBtn = document.getElementById("confirm-btn");
     const emptyHint = document.getElementById("empty-hint");
-    if(totalQty > 0){
-      confirmBtn.classList.remove("disabled");
+
+    if(isInTelegram){
+      // 在 Telegram 內：一律用原生 MainButton 送出，網頁上的按鈕永遠隱藏，
+      // 避免手機上原生按鈕跟網頁按鈕疊在同一個位置造成點不到的問題
+      confirmBtn.classList.add("hidden");
       emptyHint.style.display = "none";
-      tg?.MainButton?.setText(`確認點餐 · NT$${totalPrice}`);
-      tg?.MainButton?.show();
+
+      if(totalQty > 0){
+        tg.MainButton.setText(`確認點餐 · NT$${totalPrice}`);
+        tg.MainButton.show();
+        tg.MainButton.enable();
+      } else {
+        tg.MainButton.hide();
+      }
     } else {
-      confirmBtn.classList.add("disabled");
-      emptyHint.style.display = "block";
-      tg?.MainButton?.hide();
+      // 不在 Telegram 內（例如用電腦瀏覽器直接打開網址測試）：顯示網頁按鈕
+      confirmBtn.classList.remove("hidden");
+      if(totalQty > 0){
+        confirmBtn.classList.remove("disabled");
+        emptyHint.style.display = "none";
+      } else {
+        confirmBtn.classList.add("disabled");
+        emptyHint.style.display = "block";
+      }
     }
   }
 
@@ -359,7 +380,9 @@
   }
 
   document.getElementById("confirm-btn").addEventListener("click", submitOrder);
-  tg?.MainButton?.onClick(submitOrder);
+  if(isInTelegram){
+    tg.MainButton.onClick(submitOrder);
+  }
 
   renderTabs();
   renderMenu();

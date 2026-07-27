@@ -9,7 +9,6 @@ Telegram 點餐 Bot 後端
 
 import json
 import logging
-from datetime import datetime
 
 from telegram import (
     Update,
@@ -33,7 +32,7 @@ BOT_TOKEN = "8396988188:AAHnH2wRRu0IpnMB7gicvqwXc6bB8f-axso"
 
 # 部署完成後，把這裡換成你的 Mini App 網址 (必須是 https)
 # 例如用 GitHub Pages / Vercel / Netlify 部署 index.html 後拿到的網址
-WEBAPP_URL = "https://168cod-del.github.io/ggman/"
+WEBAPP_URL = "https://your-domain.example.com/index.html"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -85,23 +84,17 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⚠️ 你的購物車是空的，請至少選擇一項餐點。")
         return
 
-    # 組合訂單摘要文字
-    lines = ["🧾 *訂單確認*\n"]
-    for item in items:
-        name = item.get("name", "未知品項")
-        qty = item.get("qty", 0)
-        price = item.get("price", 0)
-        subtotal = price * qty
-        lines.append(f"• {name} x{qty} — NT${subtotal}")
+    # 組合訂單摘要文字：只保留「點單人、品項、金額」
+    customer_name = update.effective_user.full_name
+    item_strs = [f"{item.get('name', '未知品項')} x{item.get('qty', 0)}" for item in items]
 
-    lines.append("")
-    lines.append(f"💰 *總金額：NT${total}*")
-    lines.append(f"🕒 訂單時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"👤 顧客：{update.effective_user.full_name}")
+    summary_text = (
+        f"👤 {customer_name}\n"
+        f"🍽️ {'、'.join(item_strs)}\n"
+        f"💰 NT${total}"
+    )
 
-    summary_text = "\n".join(lines)
-
-    await update.message.reply_text(summary_text, parse_mode="Markdown")
+    await update.message.reply_text(summary_text)
 
     # 這裡可以擴充：把訂單寫入資料庫、轉發到店家群組、串接金流等
     logger.info("收到新訂單 from %s: %s", update.effective_user.id, order)
