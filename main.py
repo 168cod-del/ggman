@@ -33,7 +33,7 @@ BOT_TOKEN = "8396988188:AAHnH2wRRu0IpnMB7gicvqwXc6bB8f-axso"
 
 # 部署完成後，把這裡換成你的 Mini App 網址 (必須是 https)
 # 例如用 GitHub Pages / Vercel / Netlify 部署 index.html 後拿到的網址
-WEBAPP_URL = "https://your-domain.example.com/index.html"
+WEBAPP_URL = "https://168cod-del.github.io/ggman/"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
