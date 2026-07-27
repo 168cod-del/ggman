@@ -319,7 +319,8 @@
   }
 
   // 是否真的在 Telegram App 內開啟（不是用一般電腦瀏覽器直接打開網址測試）
-  const isInTelegram = !!(tg && tg.initData && tg.initData.length > 0);
+  // 用 platform 判斷而不是 initData，因為透過 Keyboard Button 開啟時 initData 會是空字串
+  const isInTelegram = !!(tg && tg.platform && tg.platform !== "unknown");
 
   function updateCartBar(){
     const ids = Object.keys(cart);

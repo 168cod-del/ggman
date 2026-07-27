@@ -12,8 +12,8 @@ import logging
 
 from telegram import (
     Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     WebAppInfo,
 )
 from telegram.ext import (
@@ -32,7 +32,7 @@ BOT_TOKEN = "8396988188:AAHnH2wRRu0IpnMB7gicvqwXc6bB8f-axso"
 
 # 部署完成後，把這裡換成你的 Mini App 網址 (必須是 https)
 # 例如用 GitHub Pages / Vercel / Netlify 部署 index.html 後拿到的網址
-WEBAPP_URL = "https://168cod-del.github.io/ggman/"
+WEBAPP_URL = "https://your-domain.example.com/index.html"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -45,21 +45,29 @@ logger = logging.getLogger(__name__)
 # /start 指令：顯示歡迎訊息 + 開啟 Mini App 按鈕
 # ------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # 重要：sendData() 只有在透過「Keyboard Button」開啟 Mini App 時才會生效，
+    # 用 InlineKeyboardButton 或 BotFather 的 Menu Button 開啟的話，
+    # 點餐完傳回的資料會被 Telegram 直接忽略，訂單永遠送不回聊天室。
     keyboard = [
         [
-            InlineKeyboardButton(
+            KeyboardButton(
                 text="🍽️ 開始點餐",
                 web_app=WebAppInfo(url=WEBAPP_URL),
             )
         ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
     user_name = update.effective_user.first_name or "顧客"
     await update.message.reply_text(
         f"👋 嗨 {user_name}，歡迎光臨！\n\n"
-        "請點擊下方按鈕開啟點餐頁面，選好餐點後按「確認點餐」，\n"
-        "訂單就會自動回傳到這裡讓我們為你處理。",
+        "請點擊下方「🍽️ 開始點餐」按鈕開啟點餐頁面，選好餐點後按「確認點餐」，\n"
+        "訂單就會自動回傳到這裡讓我們為你處理。\n\n"
+        "這個按鈕之後會一直留在輸入框上方，不用每次都輸入 /start。",
         reply_markup=reply_markup,
     )
 
