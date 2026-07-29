@@ -40,6 +40,7 @@
   }
   .btn-primary{ background: var(--accent); color: #2b1d05; }
   .btn-danger{ background: var(--danger); color: #fff; }
+  .btn-secondary{ background: var(--line); color: var(--text); }
 
   .row{ display:flex; gap: 8px; }
   .row input{ flex:1; margin-bottom:0; }
@@ -74,12 +75,13 @@
 <div id="main-content" style="display:none;">
   <h1>🍽️ 餐廳後台管理</h1>
   <p class="hint">
-    平常新增餐廳建議直接在 Telegram 打「/新增菜單 餐廳名稱」，接著上傳一張菜單照片即可。<br/>
-    這裡只是輔助查看目前有哪些餐廳、有沒有照片，以及刪除餐廳用。資料存在伺服器記憶體中，重新部署會重置。
+    新增餐廳後，可以直接在下方清單按「📷 上傳照片」選擇圖片（電腦、手機都可以）；
+    也可以在 Telegram 打「/新增菜單 餐廳名稱」，接著上傳一張菜單照片。
+    資料存在伺服器記憶體中，重新部署會重置。
   </p>
 
   <div class="panel">
-    <h2>新增空白餐廳（之後仍需在 Telegram 補上傳照片）</h2>
+    <h2>新增餐廳</h2>
     <div class="row">
       <input type="text" id="new-restaurant-name" placeholder="餐廳名稱" />
       <button class="btn-primary" onclick="addRestaurant()">新增</button>
@@ -90,7 +92,7 @@
   <div class="panel">
     <h2>目前的餐廳清單</h2>
     <table>
-      <thead><tr><th>餐廳名稱</th><th>菜單照片</th><th></th></tr></thead>
+      <thead><tr><th>餐廳名稱</th><th>菜單照片</th><th></th><th></th></tr></thead>
       <tbody id="restaurant-tbody"></tbody>
     </table>
   </div>
@@ -146,16 +148,49 @@
   function renderTable(restaurants){
     const tbody = document.getElementById("restaurant-tbody");
     if(restaurants.length === 0){
-      tbody.innerHTML = `<tr><td colspan="3">目前還沒有任何餐廳</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="4">目前還沒有任何餐廳</td></tr>`;
       return;
     }
-    tbody.innerHTML = restaurants.map(r => `
+    tbody.innerHTML = restaurants.map((r, idx) => `
       <tr>
         <td>${r.name}</td>
         <td class="${r.has_photo ? 'status-yes' : 'status-no'}">${r.has_photo ? '✅ 已上傳' : '— 尚未上傳'}</td>
+        <td>
+          <button class="btn-secondary" onclick="triggerUpload(${idx})">📷 上傳照片</button>
+          <input type="file" accept="image/*" style="display:none;" id="photo-input-${idx}"
+                 onchange="onPhotoChosen(${idx}, '${r.name.replace(/'/g, "\\'")}')" />
+        </td>
         <td><button class="btn-danger" onclick="deleteRestaurant('${r.name.replace(/'/g, "\\'")}')">刪除</button></td>
       </tr>
     `).join("");
+  }
+
+  function triggerUpload(idx){
+    document.getElementById(`photo-input-${idx}`).click();
+  }
+
+  function fileToBase64(file){
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function onPhotoChosen(idx, name){
+    const input = document.getElementById(`photo-input-${idx}`);
+    const file = input.files[0];
+    if(!file) return;
+    try{
+      const base64 = await fileToBase64(file);
+      await apiPostAdmin(`/api/admin/restaurants/${encodeURIComponent(name)}/photo`, { image_base64: base64 });
+      await loadRestaurants();
+    } catch(e){
+      alert(e.message);
+    } finally {
+      input.value = "";
+    }
   }
 
   async function addRestaurant(){
@@ -169,7 +204,7 @@
     }
     try{
       await apiPostAdmin("/api/admin/restaurants", { name });
-      msgEl.textContent = `已新增「${name}」，記得在 Telegram 補上傳菜單照片`;
+      msgEl.textContent = `已新增「${name}」，可以在下方清單上傳菜單照片`;
       msgEl.className = "msg success";
       nameInput.value = "";
       await loadRestaurants();

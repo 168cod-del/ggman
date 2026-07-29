@@ -54,8 +54,10 @@ Telegram 點餐 Bot 後端（文字點餐版）
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import re
@@ -72,6 +74,7 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
     WebAppInfo,
 )
 from telegram.ext import (
@@ -114,16 +117,19 @@ BOT_USERNAME = ""  # 啟動時會自動抓取，用來組「跳轉到私訊」�
 # 資料儲存（記憶體版本）
 # ------------------------------------------------------------------
 
-# restaurants: { 餐廳名稱: {"photo_file_id": str | None} }
+# restaurants: { 餐廳名稱: {
+#   "photo_file_id": str | None,       # 從 Telegram 聊天室上傳照片時會有值
+#   "photo_bytes_base64": str | None,  # 從網頁後台上傳照片時會有值
+# } }
 restaurants: dict[str, dict] = {
-    "阿明快炒": {"photo_file_id": None},
-    "巷口便當": {"photo_file_id": None},
-    "涼夏冷飲": {"photo_file_id": None},
-    "深夜燒烤": {"photo_file_id": None},
-    "晨光早餐店": {"photo_file_id": None},
+    "阿明快炒": {"photo_file_id": None, "photo_bytes_base64": None},
+    "巷口便當": {"photo_file_id": None, "photo_bytes_base64": None},
+    "涼夏冷飲": {"photo_file_id": None, "photo_bytes_base64": None},
+    "深夜燒烤": {"photo_file_id": None, "photo_bytes_base64": None},
+    "晨光早餐店": {"photo_file_id": None, "photo_bytes_base64": None},
 }
 # 這 5 間是測試用的預設餐廳，還沒有菜單照片；
-# 想要有照片可以直接用 /新增菜單 重新加一次（同名會覆蓋）
+# 可以直接用 /新增菜單 在聊天室補一次，或到後台網頁上傳照片
 
 # pending_menu_uploads: { user_id: 餐廳名稱 }
 # 記錄「剛打完新增菜單指令、正在等待上傳菜單照片」的人
@@ -150,28 +156,74 @@ SELECT_RESTAURANT_PREFIX = "select_restaurant:"
 # ------------------------------------------------------------------
 # 文字點餐解析
 # ------------------------------------------------------------------
+# 品項清單常見的分隔符號：加號、斜線、句點、空白（空白已經由 text.split() 處理）
+_ITEM_SEP_RE = re.compile(r"[+/.]")
+
+
+def _expand_plus(tokens: list[str]) -> list[str]:
+    """把像「牛肉麵+豬頭皮/酸菜.貢丸湯」這種用 + / . 黏在一起的詞，拆成多個獨立品項。"""
+    out = []
+    for t in tokens:
+        if _ITEM_SEP_RE.search(t):
+            out.extend(p for p in _ITEM_SEP_RE.split(t) if p)
+        else:
+            out.append(t)
+    return out
+
+
+def _build_items(name_tokens: list[str], prices: list) -> list[dict]:
+    if len(name_tokens) == 1 and len(prices) == 1:
+        m = re.match(r"^(.+?)[xX](\d+)$", name_tokens[0])
+        if m:
+            return [{"name": m.group(1), "qty": int(m.group(2)), "price": prices[0]}]
+        return [{"name": name_tokens[0], "qty": 1, "price": prices[0]}]
+    return [{"name": nm, "qty": 1, "price": p} for nm, p in zip(name_tokens, prices)]
+
+
 def parse_order_text(text: str):
     """
-    嘗試把一則文字訊息解析成點餐內容。順序可以打亂——金額可以寫在
-    品項前面或後面都可以辨識，不強制「品項一定要在金額前面」。
+    嘗試把一則文字訊息解析成點餐內容。金額是必填的——完全沒有數字的訊息
+    一律當成一般聊天安靜忽略，這樣才能在開單期間也不會誤觸發、洗版。
 
-    支援：
-      單品項：品項[X數量] 金額 [備註]  或  金額 品項[X數量] [備註]
-        例：牛排X2 300 五分熟  /  300 牛排X2 五分熟
-      多品項：品項1 品項2... 金額1+金額2...[備註]  或  金額1+金額2... 品項1 品項2...[備註]
-        例：地瓜球 紅茶 30+30 少冰  /  30+30 地瓜球 紅茶 少冰
-
-    （備註只能整段連在一起放在「品項」的另一側，不能跟品項文字混在同一側，
-      不然沒辦法分辨哪個字是品項、哪個是備註）
+    支援的格式（金額可放最前面或最後面）：
+      單品項：品項[X數量] 金額 [備註]        例：牛排X2 300 五分熟
+      多品項＋各自金額：
+        品項1 品項2 金額1+金額2 [備註]        例：地瓜球 紅茶 30+30 少冰
+        品項1+品項2 金額1+金額2               例：牛肉麵+豬頭皮+酸菜 30+30+30
+        品項1品項1金額品項2金額...（無分隔）   例：牛肉麵30豬頭皮30酸菜30
+      多品項＋共用一個總金額（金額須放最後面）：
+        品項1 品項2 總金額                    例：牛肉麵 豬頭皮 酸菜 90
+        品項1+品項2 總金額                    例：牛肉麵+豬頭皮+酸菜 90
+        品項1 品項2＝總金額 或 品項1 品項2=總金額  例：牛肉麵 豬頭皮 酸菜＝90
 
     回傳：
-      None       -> 完全不像點餐內容（沒有數字），呼叫端應安靜忽略
-      "MISMATCH" -> 看起來像是要點餐但格式兜不起來，呼叫端應提示格式
-      (items, note) -> 解析成功
+      None       -> 完全沒有數字，不像點餐內容，呼叫端應安靜忽略
+      "MISMATCH" -> 看起來像點餐但格式兜不起來，呼叫端應提示格式錯誤
+      (items, note, total_override) -> 解析成功
+        total_override 是 None 時，總金額 = 各品項金額加總；
+        不是 None 時（多品項共用總金額的情況），總金額直接用這個數字，
+        此時各品項的 price 都會是 0（只是為了記錄品項名稱用）
     """
     text = text.strip()
     if not text:
         return None
+
+    # ---- 「品項＝總金額」或「品項=總金額」----
+    for eq in ("＝", "="):
+        if eq in text:
+            left, _, right = text.partition(eq)
+            left, right = left.strip(), right.strip()
+            if not left or not re.fullmatch(r"\d+(\.\d+)?", right):
+                return "MISMATCH"
+            names = [n for n in re.split(r"[+/.\s]+", left) if n]
+            if not names:
+                return "MISMATCH"
+            total = float(right) if "." in right else int(right)
+            items = [{"name": n, "qty": 1, "price": 0} for n in names]
+            return (items, "", total)
+
+    if not re.search(r"\d", text):
+        return None  # 完全沒有數字，不像點餐內容，安靜忽略
 
     tokens = text.split()
 
@@ -182,7 +234,22 @@ def parse_order_text(text: str):
             break
 
     if price_idx is None:
-        return None
+        # 數字沒有被空白獨立出來，嘗試辨識「品項數字品項數字...」黏在一起的寫法
+        pairs = list(re.finditer(r"([^\d]+?)(\d+(?:\.\d+)?)", text))
+        if pairs and pairs[0].start() == 0:
+            remainder = text[pairs[-1].end():].strip()
+            if not remainder or not re.search(r"\d", remainder):
+                items = [
+                    {
+                        "name": m.group(1).strip(),
+                        "qty": 1,
+                        "price": float(m.group(2)) if "." in m.group(2) else int(m.group(2)),
+                    }
+                    for m in pairs if m.group(1).strip()
+                ]
+                if items:
+                    return (items, remainder, None)
+        return "MISMATCH"
 
     before = tokens[:price_idx]
     price_tok = tokens[price_idx]
@@ -191,38 +258,41 @@ def parse_order_text(text: str):
     prices = [float(p) if "." in p else int(p) for p in price_tok.split("+")]
     n = len(prices)
 
-    if len(before) == n:
-        name_tokens, note_tokens = before, after
-    elif len(after) == n:
-        name_tokens, note_tokens = after, before
-    else:
-        return "MISMATCH"
+    expanded_before = _expand_plus(before)
+    expanded_after = _expand_plus(after)
 
-    if not name_tokens:
-        return "MISMATCH"
+    if len(expanded_before) == n:
+        return (_build_items(expanded_before, prices), " ".join(after), None)
 
-    note = " ".join(note_tokens)
+    if len(expanded_after) == n:
+        return (_build_items(expanded_after, prices), " ".join(before), None)
 
-    if len(name_tokens) == 1:
-        m = re.match(r"^(.+?)[xX](\d+)$", name_tokens[0])
-        if m:
-            name, qty = m.group(1), int(m.group(2))
-        else:
-            name, qty = name_tokens[0], 1
-        return ([{"name": name, "qty": qty, "price": prices[0]}], note)
+    # 只有在金額是整句最後一個詞、且前面有品項時，才當作「多品項共用一個總金額」
+    if n == 1 and not after:
+        combined = [t for t in expanded_before if t]
+        if combined:
+            items = [{"name": t, "qty": 1, "price": 0} for t in combined]
+            return (items, "", prices[0])
 
-    items = [{"name": nm, "qty": 1, "price": p} for nm, p in zip(name_tokens, prices)]
-    return (items, note)
+    return "MISMATCH"
 
 
-def record_order(chat_id: int, user_id: int, user_name: str, items: list[dict], note: str, raw_text: str):
+def record_order(
+    chat_id: int,
+    user_id: int,
+    user_name: str,
+    items: list[dict],
+    note: str,
+    raw_text: str,
+    total_override=None,
+):
     """把解析好的訂單記錄進場次（同一人重複點餐會覆蓋前一筆），並存進個人歷史。
     回傳要貼回聊天室的單行摘要文字；若場次不存在或餐廳未選，回傳 None。"""
     session = active_sessions.get(chat_id)
     if not session or not session.get("restaurant"):
         return None
 
-    total = sum(item["price"] for item in items)
+    total = total_override if total_override is not None else sum(item["price"] for item in items)
 
     order_record = {
         "user_name": user_name,
@@ -243,7 +313,9 @@ def record_order(chat_id: int, user_id: int, user_name: str, items: list[dict], 
 def build_order_line(user_name: str, order_record: dict) -> str:
     item_strs = [f"{it['name']}x{it['qty']}" for it in order_record["items"]]
     note_part = f"（{order_record['note']}）" if order_record.get("note") else ""
-    return f"👤{user_name} 🍽️{'、'.join(item_strs)}{note_part} 💰NT${order_record['total']}"
+    total = order_record["total"]
+    price_part = f" 💰NT${total}" if total > 0 else ""
+    return f"👤{user_name} 🍽️{'、'.join(item_strs)}{note_part}{price_part}"
 
 
 def build_final_summary(session: dict) -> str:
@@ -266,10 +338,12 @@ def build_final_summary(session: dict) -> str:
         detail_lines = "\n".join(detail_lines_list)
         agg_lines = "\n".join(f"・{name} x{qty}" for name, qty in items_agg.items())
 
+    total_line = f"合計 NT${grand_total}" if grand_total > 0 else "（沒有輸入金額，請自行加總）"
+
     return (
         f"✅ 點餐結束\n"
         f"🏠 餐廳：{restaurant}\n"
-        f"共 {len(orders)} 筆訂單，合計 NT${grand_total}\n\n"
+        f"共 {len(orders)} 筆訂單，{total_line}\n\n"
         f"【每人明細】\n{detail_lines}\n\n"
         f"【品項彙總】\n{agg_lines}"
     )
@@ -397,15 +471,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if parsed is None:
         return  # 不像點餐內容，當一般聊天，安靜忽略
     if parsed == "MISMATCH":
-        await update.message.reply_text(
-            "⚠️ 品項數量跟金額數量對不起來，請確認格式：\n"
-            "單品項：品項X數量 金額 備註（金額可放前面或後面）\n"
-            "多品項：品項1 品項2 金額1+金額2 備註"
-        )
+        await update.message.reply_text("⚠️ 格式錯誤，請重新輸入（需包含品項與金額）")
         return
 
-    items, note = parsed
-    summary = record_order(chat_id, user.id, user.full_name, items, note, text)
+    items, note, total_override = parsed
+    summary = record_order(chat_id, user.id, user.full_name, items, note, text, total_override)
     if summary:
         await update.message.reply_text(summary)
 
@@ -443,7 +513,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return  # 沒有人在等待上傳菜單照片，完全不理會，避免亂反應
 
     photo = update.effective_message.photo[-1]  # 取最大尺寸
-    restaurants[restaurant_name] = {"photo_file_id": photo.file_id}
+    restaurants[restaurant_name] = {"photo_file_id": photo.file_id, "photo_bytes_base64": None}
     del pending_menu_uploads[user_id]
 
     await update.message.reply_text(f"✅ 已新增「{restaurant_name}」，菜單照片已儲存。")
@@ -451,6 +521,32 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def admin_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"🔑 後台管理連結：\n{BASE_URL}/admin")
+
+
+def _has_photo(restaurant_data: dict) -> bool:
+    return bool(restaurant_data.get("photo_file_id") or restaurant_data.get("photo_bytes_base64"))
+
+
+async def send_restaurant_menu(bot, chat_id: int, restaurant: str) -> None:
+    """把餐廳的菜單照片發到聊天室；沒有照片就發文字提示。
+    菜單照片可能是從 Telegram 聊天室上傳（photo_file_id）或從網頁後台上傳
+    （photo_bytes_base64），兩種來源都要能正常發送。"""
+    data = restaurants[restaurant]
+    photo_file_id = data.get("photo_file_id")
+    photo_bytes_b64 = data.get("photo_bytes_base64")
+    caption = f"🍽️ {restaurant} 菜單，請大家對照著點餐"
+
+    if photo_file_id:
+        await bot.send_photo(chat_id=chat_id, photo=photo_file_id, caption=caption)
+    elif photo_bytes_b64:
+        photo_bytes = base64.b64decode(photo_bytes_b64)
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=InputFile(io.BytesIO(photo_bytes), filename="menu.jpg"),
+            caption=caption,
+        )
+    else:
+        await bot.send_message(chat_id=chat_id, text=f"🏠 已選擇「{restaurant}」（這間餐廳目前還沒有菜單照片）")
 
 
 # ------------------------------------------------------------------
@@ -479,15 +575,7 @@ async def select_restaurant_callback(update: Update, context: ContextTypes.DEFAU
     session["restaurant"] = restaurant
     await query.edit_message_reply_markup(reply_markup=None)
 
-    photo_file_id = restaurants[restaurant].get("photo_file_id")
-    if photo_file_id:
-        await context.bot.send_photo(
-            chat_id=chat_id, photo=photo_file_id, caption=f"🍽️ {restaurant} 菜單，請大家對照著點餐"
-        )
-    else:
-        await context.bot.send_message(
-            chat_id=chat_id, text=f"🏠 已選擇「{restaurant}」（這間餐廳目前還沒有菜單照片）"
-        )
+    await send_restaurant_menu(context.bot, chat_id, restaurant)
 
 
 # ------------------------------------------------------------------
@@ -651,7 +739,7 @@ async def api_list_restaurants():
 async def api_get_menu(restaurant: str):
     if restaurant not in restaurants:
         raise HTTPException(404, "餐廳不存在")
-    return {"restaurant": restaurant, "has_photo": bool(restaurants[restaurant].get("photo_file_id"))}
+    return {"restaurant": restaurant, "has_photo": _has_photo(restaurants[restaurant])}
 
 
 @app.get("/api/session/{chat_id}")
@@ -689,13 +777,15 @@ async def api_upsert_my_order(
 
     parsed = parse_order_text(body.raw_text)
     if parsed is None or parsed == "MISMATCH":
-        raise HTTPException(400, "格式無法解析，請確認「品項 金額 備註」的格式")
+        raise HTTPException(400, "格式錯誤，請重新輸入（需包含品項與金額）")
 
-    items, note = parsed
+    items, note, total_override = parsed
     user_name = tg_user.get("first_name", "") + (
         f" {tg_user['last_name']}" if tg_user.get("last_name") else ""
     )
-    summary = record_order(chat_id, tg_user["id"], user_name.strip() or "使用者", items, note, body.raw_text)
+    summary = record_order(
+        chat_id, tg_user["id"], user_name.strip() or "使用者", items, note, body.raw_text, total_override
+    )
 
     if summary and telegram_app:
         await telegram_app.bot.send_message(chat_id=chat_id, text=f"✏️ {summary}")
@@ -741,11 +831,13 @@ async def api_order_from_history(
     if parsed is None or parsed == "MISMATCH":
         raise HTTPException(400, "這筆歷史紀錄格式異常，無法重新送出")
 
-    items, note = parsed
+    items, note, total_override = parsed
     user_name = tg_user.get("first_name", "") + (
         f" {tg_user['last_name']}" if tg_user.get("last_name") else ""
     )
-    summary = record_order(chat_id, tg_user["id"], user_name.strip() or "使用者", items, note, body.raw_text)
+    summary = record_order(
+        chat_id, tg_user["id"], user_name.strip() or "使用者", items, note, body.raw_text, total_override
+    )
 
     if summary and telegram_app:
         await telegram_app.bot.send_message(chat_id=chat_id, text=summary)
@@ -772,7 +864,7 @@ async def api_add_restaurant(body: NewRestaurantBody, x_admin_password: str = He
         raise HTTPException(400, "餐廳名稱不能空白")
     if name in restaurants:
         raise HTTPException(400, "這間餐廳已經存在")
-    restaurants[name] = {"photo_file_id": None}
+    restaurants[name] = {"photo_file_id": None, "photo_bytes_base64": None}
     return {"ok": True}
 
 
@@ -781,10 +873,36 @@ async def api_admin_list_restaurants(x_admin_password: str = Header(default=""))
     check_admin_password(x_admin_password)
     return {
         "restaurants": [
-            {"name": name, "has_photo": bool(data.get("photo_file_id"))}
+            {"name": name, "has_photo": _has_photo(data)}
             for name, data in restaurants.items()
         ]
     }
+
+
+class UploadPhotoBody(BaseModel):
+    image_base64: str
+
+
+@app.post("/api/admin/restaurants/{restaurant}/photo")
+async def api_upload_restaurant_photo(
+    restaurant: str, body: UploadPhotoBody, x_admin_password: str = Header(default="")
+):
+    check_admin_password(x_admin_password)
+    if restaurant not in restaurants:
+        raise HTTPException(404, "餐廳不存在，請先新增餐廳")
+
+    image_data = body.image_base64
+    if image_data.startswith("data:") and "," in image_data:
+        image_data = image_data.split(",", 1)[1]
+
+    try:
+        base64.b64decode(image_data)
+    except Exception:
+        raise HTTPException(400, "圖片資料格式錯誤")
+
+    restaurants[restaurant]["photo_bytes_base64"] = image_data
+    restaurants[restaurant]["photo_file_id"] = None  # 換成新照片後，舊的 file_id 版本失效
+    return {"ok": True}
 
 
 class DeleteRestaurantBody(BaseModel):
