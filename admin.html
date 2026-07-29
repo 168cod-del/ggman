@@ -41,7 +41,6 @@
   .btn-primary{ background: var(--accent); color: #2b1d05; }
   .btn-danger{ background: var(--danger); color: #fff; }
   .btn-secondary{ background: var(--line); color: var(--text); }
-  button:disabled{ opacity: .4; cursor: not-allowed; }
 
   .row{ display:flex; gap: 8px; }
   .row input{ flex:1; }
@@ -76,7 +75,10 @@
 
 <div id="main-content" style="display:none;">
   <h1>🍽️ 菜單後台管理</h1>
-  <p class="hint">目前資料存在伺服器記憶體中，重新部署會重置。</p>
+  <p class="hint">
+    平常建議直接在 Telegram 用 <code>/newmenu</code> 貼上菜單即可，
+    這裡是備用的手動校正工具（改錯字、改金額）。資料存在伺服器記憶體中，重新部署會重置。
+  </p>
 
   <div class="panel">
     <h2>① 新增餐廳</h2>
@@ -95,15 +97,11 @@
   </div>
 
   <div class="panel disabled-overlay" id="menu-panel">
-    <h2>③ 上傳菜單照片（AI 辨識，辨識後可手動修改）</h2>
-    <p class="hint">請先選擇上方的餐廳，才能上傳或編輯菜單</p>
-    <input type="file" accept="image/*" id="photo-input" onchange="onPhotoSelected(event)" />
-    <div id="ocr-status"></div>
-
-    <h2 style="margin-top:20px;">④ 菜單明細（可手動新增 / 修改 / 刪除）</h2>
+    <h2>③ 菜單明細（可手動新增 / 修改 / 刪除）</h2>
+    <p class="hint">請先選擇上方的餐廳，才能編輯菜單</p>
     <table>
       <thead>
-        <tr><th>分類</th><th>品項名稱</th><th>價格</th><th></th></tr>
+        <tr><th>品項名稱</th><th>價格</th><th></th></tr>
       </thead>
       <tbody id="menu-tbody"></tbody>
     </table>
@@ -120,9 +118,7 @@
   let currentRestaurant = "";
 
   function checkPassword(){
-    const input = document.getElementById("password-input").value;
-    // 先暫存，實際是否正確要等呼叫 API 時才知道（用第一次呼叫來驗證）
-    ADMIN_PASSWORD = input;
+    ADMIN_PASSWORD = document.getElementById("password-input").value;
     document.getElementById("password-gate").style.display = "none";
     document.getElementById("main-content").style.display = "block";
     loadRestaurants();
@@ -138,15 +134,11 @@
   async function apiPostAdmin(path, body){
     const res = await fetch(path, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Admin-Password": ADMIN_PASSWORD,
-      },
+      headers: { "Content-Type": "application/json", "X-Admin-Password": ADMIN_PASSWORD },
       body: JSON.stringify(body),
     });
     const data = await res.json();
     if(res.status === 401){
-      // 密碼錯誤，退回登入畫面
       document.getElementById("password-gate").style.display = "flex";
       document.getElementById("main-content").style.display = "none";
       document.getElementById("password-msg").textContent = "密碼錯誤，請重新輸入";
@@ -162,9 +154,7 @@
       const select = document.getElementById("restaurant-select");
       select.innerHTML = '<option value="">請選擇餐廳...</option>' +
         data.restaurants.map(name => `<option value="${name}">${name}</option>`).join("");
-    } catch(e){
-      console.error(e);
-    }
+    } catch(e){ console.error(e); }
   }
 
   async function addRestaurant(){
@@ -207,15 +197,14 @@
   function renderMenuTable(items){
     const tbody = document.getElementById("menu-tbody");
     tbody.innerHTML = "";
-    items.forEach(item => addRow(item.category, item.name, item.price));
+    items.forEach(item => addRow(item.name, item.price));
     if(items.length === 0) addEmptyRow();
   }
 
-  function addRow(category = "", name = "", price = ""){
+  function addRow(name = "", price = ""){
     const tbody = document.getElementById("menu-tbody");
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><input type="text" class="cell-category" value="${category}" /></td>
       <td><input type="text" class="cell-name" value="${name}" /></td>
       <td><input type="number" class="cell-price" value="${price}" /></td>
       <td class="col-del"><button class="btn-danger" onclick="this.closest('tr').remove()">✕</button></td>
@@ -227,7 +216,6 @@
 
   function collectRows(){
     return Array.from(document.querySelectorAll("#menu-tbody tr")).map(tr => ({
-      category: tr.querySelector(".cell-category").value.trim() || "未分類",
       name: tr.querySelector(".cell-name").value.trim(),
       price: parseFloat(tr.querySelector(".cell-price").value) || 0,
     })).filter(item => item.name);
@@ -248,40 +236,6 @@
     } catch(e){
       msgEl.textContent = e.message;
       msgEl.className = "msg error";
-    }
-  }
-
-  function fileToBase64(file){
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-  }
-
-  async function onPhotoSelected(event){
-    const file = event.target.files[0];
-    if(!file) return;
-    if(!currentRestaurant){
-      alert("請先選擇餐廳");
-      event.target.value = "";
-      return;
-    }
-
-    const statusEl = document.getElementById("ocr-status");
-    statusEl.textContent = "AI 辨識中，請稍候…";
-
-    try{
-      const base64 = await fileToBase64(file);
-      const result = await apiPostAdmin("/api/admin/menu/ocr", { image_base64: base64 });
-      statusEl.textContent = `辨識完成，共找到 ${result.items.length} 個品項，請檢查並修改下方表格後再儲存`;
-      const tbody = document.getElementById("menu-tbody");
-      result.items.forEach(item => addRow(item.category, item.name, item.price));
-    } catch(e){
-      statusEl.textContent = "辨識失敗：" + e.message;
-    } finally {
-      event.target.value = "";
     }
   }
 </script>

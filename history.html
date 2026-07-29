@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>我的點餐</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --board-bg: #1f2b22;
+    --board-bg-light: #26352b;
+    --chalk: #f2ede1;
+    --chalk-dim: #b9c2ba;
+    --amber: #e8a33d;
+    --lantern-red: #c0392b;
+    --line: rgba(242,237,225,0.14);
+  }
+  *{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body{
+    margin:0; padding:0; min-height:100vh;
+    background: var(--board-bg); color: var(--chalk);
+    font-family: 'Noto Sans TC', sans-serif;
+  }
+  header{ padding: 22px 20px 8px; }
+  header h1{ font-family:'Kalam', cursive; font-size: 24px; margin:0 0 4px; }
+  header p{ margin:0; font-size: 12.5px; color: var(--chalk-dim); }
+
+  main{ padding: 4px 20px 40px; }
+
+  .section-title{
+    font-family:'Kalam', cursive; font-size: 18px; color: var(--amber);
+    margin: 22px 0 10px; display:flex; align-items:center; gap:8px;
+  }
+  .section-title::after{ content:""; flex:1; height:1px; background: var(--line); }
+
+  .card{
+    background: var(--board-bg-light); border-radius: 14px; padding: 14px;
+    border: 1px solid var(--line); margin-bottom: 10px;
+  }
+  .card .order-line{ font-size: 14px; margin-bottom: 4px; }
+  .card .order-total{ font-family:'Kalam', cursive; color: var(--amber); font-size: 16px; }
+
+  .btn-row{ display:flex; gap: 8px; margin-top: 10px; }
+  button{
+    border:none; border-radius: 10px; padding: 10px 14px;
+    font-size: 13px; font-weight: 700; cursor:pointer;
+  }
+  .btn-amber{ background: var(--amber); color: #2b1d05; }
+  .btn-red{ background: var(--lantern-red); color:#fff2ea; }
+  .btn-outline{ background: transparent; border: 1px solid var(--line); color: var(--chalk); }
+  button:disabled{ opacity: .4; }
+
+  textarea{
+    width:100%; min-height: 70px; border-radius: 10px; border: 1px solid var(--line);
+    background: #141817; color: var(--chalk); font-size: 14px; padding: 10px;
+    font-family: inherit; resize: vertical;
+  }
+
+  .empty-hint{ color: var(--chalk-dim); font-size: 13px; }
+
+  .status-screen{
+    min-height: 80vh; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; padding: 0 24px; gap: 10px;
+  }
+  .status-screen .icon{ font-size: 40px; }
+  .status-screen p{ color: var(--chalk-dim); font-size: 14px; margin:0; }
+  .toast{
+    font-size: 12.5px; margin-top: 8px;
+  }
+  .toast.error{ color: #e07a6b; }
+  .toast.success{ color: #8fcf8f; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div class="status-screen"><p>載入中…</p></div>
+</div>
+
+<script>
+  const tg = window.Telegram?.WebApp;
+  tg?.ready();
+  tg?.expand();
+
+  const params = new URLSearchParams(window.location.search);
+  const chatId = params.get("chat_id");
+  const app = document.getElementById("app");
+
+  function showStatus(icon, text){
+    app.innerHTML = `<div class="status-screen"><div class="icon">${icon}</div><p>${text}</p></div>`;
+  }
+
+  async function apiGet(path){
+    const res = await fetch(path, { headers: { "X-Telegram-Init-Data": tg?.initData || "" } });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.detail || "request failed");
+    return data;
+  }
+
+  async function apiPost(path, body){
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Init-Data": tg?.initData || "" },
+      body: JSON.stringify(body || {}),
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.detail || "request failed");
+    return data;
+  }
+
+  function renderPage(myOrder, history){
+    app.innerHTML = `
+      <header>
+        <h1>📋 我的點餐</h1>
+        <p>修改、刪除本場訂單，或從常用紀錄快速重送</p>
+      </header>
+      <main>
+        <div class="section-title">本場我的訂單</div>
+        <div id="my-order-area"></div>
+
+        <div class="section-title">常用紀錄（最近 4 筆）</div>
+        <div id="history-area"></div>
+      </main>
+    `;
+
+    renderMyOrder(myOrder);
+    renderHistory(history);
+  }
+
+  function renderMyOrder(order){
+    const area = document.getElementById("my-order-area");
+    if(!order){
+      area.innerHTML = `
+        <p class="empty-hint">你這場還沒有點餐，直接在聊天室打字送出即可。</p>
+        <textarea id="new-order-input" placeholder="例：牛排X1 150 五分熟"></textarea>
+        <div class="btn-row">
+          <button class="btn-amber" id="submit-new-order">送出</button>
+        </div>
+        <div class="toast" id="new-order-toast"></div>
+      `;
+      document.getElementById("submit-new-order").addEventListener("click", submitNewOrder);
+      return;
+    }
+
+    const itemStrs = order.items.map(it => `${it.name}x${it.qty}`).join("、");
+    const notePart = order.note ? `（${order.note}）` : "";
+
+    area.innerHTML = `
+      <div class="card">
+        <div class="order-line">🍽️ ${itemStrs}${notePart}</div>
+        <div class="order-total">💰 NT$${order.total}</div>
+        <div class="btn-row">
+          <button class="btn-outline" id="edit-btn">✏️ 修改</button>
+          <button class="btn-red" id="delete-btn">🗑️ 刪除</button>
+        </div>
+        <div id="edit-area" style="display:none; margin-top:10px;">
+          <textarea id="edit-input">${order.raw_text}</textarea>
+          <div class="btn-row">
+            <button class="btn-amber" id="save-edit-btn">儲存修改</button>
+          </div>
+        </div>
+        <div class="toast" id="my-order-toast"></div>
+      </div>
+    `;
+
+    document.getElementById("edit-btn").addEventListener("click", () => {
+      document.getElementById("edit-area").style.display = "block";
+    });
+    document.getElementById("delete-btn").addEventListener("click", deleteMyOrder);
+    document.getElementById("save-edit-btn").addEventListener("click", saveEdit);
+  }
+
+  function renderHistory(history){
+    const area = document.getElementById("history-area");
+    if(!history || history.length === 0){
+      area.innerHTML = `<p class="empty-hint">還沒有點餐紀錄。</p>`;
+      return;
+    }
+    area.innerHTML = history.map((h, idx) => {
+      const itemStrs = h.items.map(it => `${it.name}x${it.qty}`).join("、");
+      const notePart = h.note ? `（${h.note}）` : "";
+      return `
+        <div class="card">
+          <div class="order-line">🍽️ ${itemStrs}${notePart}</div>
+          <div class="order-total">💰 NT$${h.total}</div>
+          <div class="btn-row">
+            <button class="btn-amber" data-idx="${idx}">重新送出</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    area.querySelectorAll("button[data-idx]").forEach(btn => {
+      btn.addEventListener("click", () => reorderFromHistory(history[parseInt(btn.dataset.idx)].raw_text, btn));
+    });
+  }
+
+  async function submitNewOrder(){
+    const input = document.getElementById("new-order-input");
+    const toast = document.getElementById("new-order-toast");
+    const text = input.value.trim();
+    if(!text) return;
+    try{
+      await apiPost(`/api/session/${chatId}/my-order`, { raw_text: text });
+      toast.textContent = "已送出";
+      toast.className = "toast success";
+      setTimeout(() => tg?.close?.(), 900);
+    } catch(e){
+      toast.textContent = e.message;
+      toast.className = "toast error";
+    }
+  }
+
+  async function saveEdit(){
+    const input = document.getElementById("edit-input");
+    const toast = document.getElementById("my-order-toast");
+    const text = input.value.trim();
+    if(!text) return;
+    try{
+      await apiPost(`/api/session/${chatId}/my-order`, { raw_text: text });
+      toast.textContent = "已更新";
+      toast.className = "toast success";
+      setTimeout(() => tg?.close?.(), 900);
+    } catch(e){
+      toast.textContent = e.message;
+      toast.className = "toast error";
+    }
+  }
+
+  async function deleteMyOrder(){
+    try{
+      await apiPost(`/api/session/${chatId}/my-order/delete`, {});
+      tg?.close?.();
+    } catch(e){
+      alert(e.message);
+    }
+  }
+
+  async function reorderFromHistory(rawText, btn){
+    btn.disabled = true;
+    btn.textContent = "送出中…";
+    try{
+      await apiPost(`/api/session/${chatId}/order-from-history`, { raw_text: rawText });
+      btn.textContent = "已送出";
+      setTimeout(() => tg?.close?.(), 900);
+    } catch(e){
+      alert(e.message);
+      btn.disabled = false;
+      btn.textContent = "重新送出";
+    }
+  }
+
+  async function init(){
+    if(!chatId){
+      showStatus("⚠️", "網址缺少聊天室資訊，請從 Telegram 內的按鈕開啟。");
+      return;
+    }
+
+    let myOrderData, historyData;
+    try{
+      myOrderData = await apiGet(`/api/session/${chatId}/my-order`);
+      historyData = await apiGet(`/api/my-history`);
+    } catch(e){
+      showStatus("⚠️", e.message || "無法驗證身份，請透過 Telegram 開啟此頁面");
+      return;
+    }
+
+    if(!myOrderData.active){
+      showStatus("🔒", "目前沒有進行中的點餐。");
+      return;
+    }
+
+    renderPage(myOrderData.order, historyData.history);
+  }
+
+  init();
+</script>
+
+</body>
+</html>

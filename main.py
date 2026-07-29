@@ -1,31 +1,40 @@
 """
-Telegram 點餐 Bot 後端（含多餐廳菜單管理 + 網頁 API）
+Telegram 點餐 Bot 後端（文字點餐版）
 
 這支程式同時做兩件事：
-1. Telegram Bot（用 python-telegram-bot v20+，webhook 模式 —— 由 Telegram 主動推送新訊息過來，
-   而不是 bot 自己一直去問，這樣才能搭配 Render 免費方案的休眠機制正常運作）
-2. 一個小型網站伺服器（用 FastAPI），提供：
-   - /order            點餐頁面（Mini App，透過 Keyboard Button 開啟）
-   - /select-restaurant 選餐廳頁面（Mini App，透過 Inline 按鈕開啟）
-   - /admin            後台管理頁面（一般網頁，不需要透過 Telegram 開啟）
-   - /telegram-webhook Telegram 推送新訊息的接收端點
-   - /health           保活用的健康檢查端點（給 UptimeRobot 之類的服務定時打）
-   - /api/...          給以上頁面呼叫的資料介面
+1. Telegram Bot（webhook 模式，適合 Render 免費方案的休眠機制）
+2. 一個小型網站伺服器（FastAPI），提供：
+   - /select-restaurant 選餐廳頁面（Mini App，限發起人）
+   - /history           「我的點餐」頁面（Mini App，本場訂單修改/刪除 + 常用紀錄快速重送）
+   - /admin             後台管理頁面（手動新增餐廳、編輯菜單）
+   - /telegram-webhook  Telegram 推送新訊息的接收端點
+   - /health            保活用的健康檢查端點
+   - /api/...           給以上頁面呼叫的資料介面
 
 功能總覽：
 1. /start
    - 該聊天室第一個打 /start 的人 = 本場「發起人」
-   - 顯示「🍽️ 開始點餐」鍵盤按鈕（點餐頁面）
-   - 顯示「🏠 選擇餐廳」「🛑 結束點餐」兩顆 Inline 按鈕
-2. 發起人先用「🏠 選擇餐廳」選好餐廳（滾輪式選單），其他人才能開始點餐
-3. 大家用「🍽️ 開始點餐」點餐，送出後單行顯示在聊天室
-4. 發起人按「🛑 結束點餐」：顯示每人明細 + 品項彙總、清除場次記憶
-5. /admin 後台：新增餐廳、手動編輯菜單、上傳照片用 AI（Gemini）辨識菜單後手動校正再儲存
+   - 顯示使用說明 + 三顆 Inline 按鈕：選擇餐廳／我的點餐／結束點餐
+2. 發起人用「🏠 選擇餐廳」選好餐廳（滾輪式選單）
+3. 大家直接在聊天室打字點餐，支援兩種格式：
+   單品項：品項X數量 金額 [備註]        例：牛排X2 300 五分熟
+   多品項：品項1 品項2 ... 金額1+金額2...[備註]   例：地瓜球 紅茶 30+30 少冰
+   （金額視為該品項這一行的總金額，不會再乘以數量）
+   每人每場只會保留「最新一筆」訂單，重複輸入會覆蓋前一筆
+4. 使用者可以打開「📋 我的點餐」Mini App，修改/刪除本場自己的訂單，
+   或從最近 4 筆常用紀錄快速重新送出
+5. 發起人按「🛑 結束點餐」：顯示每人明細 + 品項彙總、清除場次記憶
+6. /newmenu 餐廳名稱 + 下面每行「品項 金額」→ 自動記住這間餐廳的菜單
+   （之後選餐廳時就能選到）
+7. /admin 後台：新增餐廳、手動編輯菜單（當作 /newmenu 之後校正錯字/金額用）
 
 注意：
-- 場次記憶、餐廳/菜單資料目前都存在「記憶體」裡（Python 的 dict），
-  這支程式一重啟（Railway 重新部署）就會清空、回到預設的 5 間測試餐廳。
+- 場次記憶、餐廳/菜單資料、使用者個人歷史，目前都存在「記憶體」裡，
+  這支程式一重啟（Render 重新部署）就會清空。
   等之後要正式上線、資料不能不見的話，要幫你接上真正的資料庫。
+- 因為點餐現在是直接看群組裡的文字訊息辨識，
+  bot 必須關閉 Telegram 的隱私模式（BotFather → /setprivacy → Disable），
+  否則群組裡的一般文字訊息不會被 bot 收到。
 """
 
 from __future__ import annotations
@@ -34,21 +43,18 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl
 
-import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from telegram import (
     Update,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     WebAppInfo,
@@ -68,20 +74,14 @@ from telegram.ext import (
 
 BOT_TOKEN = "8396988188:AAHnH2wRRu0IpnMB7gicvqwXc6bB8f-axso"
 
-# 部署到 Render 拿到網址後，把這裡換成那個網址
-# 例如 https://ggman.onrender.com（不要加結尾斜線）
+# 部署到 Render 拿到網址後，把這裡換成那個網址（不要加結尾斜線）
 BASE_URL = "https://ggman.onrender.com"
 
-# Telegram webhook 用的密鑰，隨便打一串英數字就好，不用跟任何人說
-# （Telegram 每次推訊息過來都會帶著這組密鑰，用來確認真的是 Telegram 送來的）
+# Telegram webhook 用的密鑰，不用跟任何人說
 WEBHOOK_SECRET_TOKEN = "3d5503dd54239bc4e701d1645cb9e456"
 
-# 後台管理密碼：可以自己改成想要的密碼，/admin 頁面會用這組密碼保護
-ADMIN_PASSWORD = "changeme123"
-
-# Google AI Studio (Gemini) API Key，給後台「照片辨識菜單」功能用
-GEMINI_API_KEY = "AQ.Ab8RN6L1AAOo15rPaF0lnlZfQph6-3zdFZ-MUJID9ATO1EyYnQ"
-GEMINI_MODEL = "gemini-3.5-flash"
+# 後台管理密碼，建議自己改掉
+ADMIN_PASSWORD = "a123456"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -90,40 +90,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
-# 目前 html 檔案是跟 main.py 放在同一層（沒有另外開 static 資料夾），所以直接指向 BASE_DIR
-STATIC_DIR = BASE_DIR
+STATIC_DIR = BASE_DIR  # html 檔案跟 main.py 放同一層
 
 
 # ------------------------------------------------------------------
-# 資料儲存（記憶體版本，測試階段夠用）
+# 資料儲存（記憶體版本）
 # ------------------------------------------------------------------
 
-# restaurants: { 餐廳名稱: [ {category, name, price}, ... ] }
+# restaurants: { 餐廳名稱: [ {name, price}, ... ] }
 restaurants: dict[str, list[dict]] = {
     "阿明快炒": [
-        {"category": "熱炒", "name": "客家小炒", "price": 180},
-        {"category": "熱炒", "name": "宮保雞丁", "price": 160},
-        {"category": "湯品", "name": "酸辣湯", "price": 60},
+        {"name": "客家小炒", "price": 180},
+        {"name": "宮保雞丁", "price": 160},
+        {"name": "酸辣湯", "price": 60},
     ],
     "巷口便當": [
-        {"category": "便當", "name": "招牌雞腿便當", "price": 100},
-        {"category": "便當", "name": "排骨便當", "price": 90},
-        {"category": "湯品", "name": "貢丸湯", "price": 20},
+        {"name": "招牌雞腿便當", "price": 100},
+        {"name": "排骨便當", "price": 90},
+        {"name": "貢丸湯", "price": 20},
     ],
     "涼夏冷飲": [
-        {"category": "茶飲", "name": "古早味紅茶", "price": 25},
-        {"category": "茶飲", "name": "冬瓜檸檬", "price": 35},
-        {"category": "特調", "name": "百香雙響炮", "price": 50},
+        {"name": "古早味紅茶", "price": 25},
+        {"name": "冬瓜檸檬", "price": 35},
+        {"name": "百香雙響炮", "price": 50},
     ],
     "深夜燒烤": [
-        {"category": "串烤", "name": "雞屁股", "price": 30},
-        {"category": "串烤", "name": "杏鮑菇", "price": 35},
-        {"category": "飲料", "name": "台灣啤酒", "price": 80},
+        {"name": "雞屁股", "price": 30},
+        {"name": "杏鮑菇", "price": 35},
+        {"name": "台灣啤酒", "price": 80},
     ],
     "晨光早餐店": [
-        {"category": "蛋餅系列", "name": "招牌蛋餅", "price": 35},
-        {"category": "吐司系列", "name": "總匯吐司", "price": 55},
-        {"category": "飲料", "name": "大冰奶", "price": 30},
+        {"name": "招牌蛋餅", "price": 35},
+        {"name": "總匯吐司", "price": 55},
+        {"name": "大冰奶", "price": 30},
     ],
 }
 
@@ -131,42 +130,136 @@ restaurants: dict[str, list[dict]] = {
 #   "initiator_id": int,
 #   "initiator_name": str,
 #   "restaurant": str | None,
-#   "orders": [單行訂單摘要文字, ...],
-#   "grand_total": number,
-#   "items_agg": {品項名稱: 數量},
+#   "orders_by_user": { user_id: {
+#        "user_name": str, "items": [{"name","qty","price"}],
+#        "note": str, "total": number, "raw_text": str,
+#   } },
 # } }
 active_sessions: dict[int, dict] = {}
+
+# user_history: { user_id: [ {"raw_text","items","note","total"}, ... ] }（最多留 4 筆，最新在前）
+user_history: dict[int, list[dict]] = {}
 
 END_ORDER_CALLBACK = "end_order"
 
 
+# ------------------------------------------------------------------
+# 文字點餐解析
+# ------------------------------------------------------------------
+def parse_order_text(text: str):
+    """
+    嘗試把一則文字訊息解析成點餐內容。
+
+    支援：
+      單品項：品項[X數量] 金額 [備註]           例：牛排X2 300 五分熟
+      多品項：品項1 品項2 ... 金額1+金額2...[備註]  例：地瓜球 紅茶 30+30 少冰
+
+    回傳：
+      None       -> 完全不像點餐內容（沒有數字），呼叫端應安靜忽略
+      "MISMATCH" -> 看起來像是要點餐但格式兜不起來，呼叫端應提示格式
+      (items, note) -> 解析成功
+    """
+    text = text.strip()
+    if not text:
+        return None
+
+    tokens = text.split()
+
+    price_idx = None
+    for i, tok in enumerate(tokens):
+        if re.fullmatch(r"\d+(\.\d+)?(\+\d+(\.\d+)?)*", tok):
+            price_idx = i
+            break
+
+    if price_idx is None:
+        return None
+
+    name_tokens = tokens[:price_idx]
+    price_tok = tokens[price_idx]
+    note = " ".join(tokens[price_idx + 1:])
+
+    if not name_tokens:
+        return "MISMATCH"
+
+    prices = [float(p) if "." in p else int(p) for p in price_tok.split("+")]
+
+    if len(name_tokens) == 1 and len(prices) == 1:
+        m = re.match(r"^(.+?)[xX](\d+)$", name_tokens[0])
+        if m:
+            name, qty = m.group(1), int(m.group(2))
+        else:
+            name, qty = name_tokens[0], 1
+        return ([{"name": name, "qty": qty, "price": prices[0]}], note)
+
+    if len(name_tokens) == len(prices):
+        items = [{"name": n, "qty": 1, "price": p} for n, p in zip(name_tokens, prices)]
+        return (items, note)
+
+    return "MISMATCH"
+
+
+def record_order(chat_id: int, user_id: int, user_name: str, items: list[dict], note: str, raw_text: str):
+    """把解析好的訂單記錄進場次（同一人重複點餐會覆蓋前一筆），並存進個人歷史。
+    回傳要貼回聊天室的單行摘要文字；若場次不存在或餐廳未選，回傳 None。"""
+    session = active_sessions.get(chat_id)
+    if not session or not session.get("restaurant"):
+        return None
+
+    total = sum(item["price"] for item in items)
+
+    order_record = {
+        "user_name": user_name,
+        "items": items,
+        "note": note,
+        "total": total,
+        "raw_text": raw_text,
+    }
+    session["orders_by_user"][user_id] = order_record
+
+    history = [h for h in user_history.get(user_id, []) if h["raw_text"] != raw_text]
+    history.insert(0, {"raw_text": raw_text, "items": items, "note": note, "total": total})
+    user_history[user_id] = history[:4]
+
+    return build_order_line(user_name, order_record)
+
+
+def build_order_line(user_name: str, order_record: dict) -> str:
+    item_strs = [f"{it['name']}x{it['qty']}" for it in order_record["items"]]
+    note_part = f"（{order_record['note']}）" if order_record.get("note") else ""
+    return f"👤{user_name} 🍽️{'、'.join(item_strs)}{note_part} 💰NT${order_record['total']}"
+
+
 def build_final_summary(session: dict) -> str:
-    """把一場點餐的每人明細與品項彙總整理成單一則訊息文字。"""
-    order_count = len(session["orders"])
-    grand_total = session["grand_total"]
     restaurant = session.get("restaurant") or "（未選擇）"
+    orders = list(session["orders_by_user"].items())
 
-    detail_lines = "\n".join(session["orders"]) if session["orders"] else "（沒有人點餐）"
-
-    if session["items_agg"]:
-        agg_lines = "\n".join(
-            f"・{name} x{qty}" for name, qty in session["items_agg"].items()
-        )
-    else:
+    if not orders:
+        detail_lines = "（沒有人點餐）"
         agg_lines = "（無）"
+        grand_total = 0
+    else:
+        detail_lines_list = []
+        items_agg: dict[str, int] = {}
+        grand_total = 0
+        for _user_id, record in orders:
+            detail_lines_list.append(build_order_line(record["user_name"], record))
+            grand_total += record["total"]
+            for it in record["items"]:
+                items_agg[it["name"]] = items_agg.get(it["name"], 0) + it["qty"]
+        detail_lines = "\n".join(detail_lines_list)
+        agg_lines = "\n".join(f"・{name} x{qty}" for name, qty in items_agg.items())
 
     return (
         f"✅ 點餐結束\n"
         f"🏠 餐廳：{restaurant}\n"
-        f"共 {order_count} 筆訂單，合計 NT${grand_total}\n\n"
+        f"共 {len(orders)} 筆訂單，合計 NT${grand_total}\n\n"
         f"【每人明細】\n{detail_lines}\n\n"
         f"【品項彙總】\n{agg_lines}"
     )
 
 
 # ------------------------------------------------------------------
-# Telegram initData 驗證（Telegram 官方規定的算法）
-# 用來確認「真的是這個 Telegram 使用者本人在操作」，避免有人偽造身份
+# Telegram initData 驗證
 # ------------------------------------------------------------------
 def validate_init_data(init_data: str, bot_token: str, max_age_seconds: int = 86400):
     if not init_data:
@@ -181,11 +274,8 @@ def validate_init_data(init_data: str, bot_token: str, max_age_seconds: int = 86
         return None
 
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-
     secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-    computed_hash = hmac.new(
-        secret_key, data_check_string.encode(), hashlib.sha256
-    ).hexdigest()
+    computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(computed_hash, received_hash):
         return None
@@ -199,8 +289,15 @@ def validate_init_data(init_data: str, bot_token: str, max_age_seconds: int = 86
     return {"user": user, "auth_date": auth_date}
 
 
+def require_telegram_user(x_telegram_init_data: str) -> dict:
+    validated = validate_init_data(x_telegram_init_data, BOT_TOKEN)
+    if not validated or not validated.get("user"):
+        raise HTTPException(401, "無法驗證身份，請透過 Telegram 開啟此頁面")
+    return validated["user"]
+
+
 # ------------------------------------------------------------------
-# /start 指令
+# /start
 # ------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -211,88 +308,129 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "initiator_id": user.id,
             "initiator_name": user.full_name,
             "restaurant": None,
-            "orders": [],
-            "grand_total": 0,
-            "items_agg": {},
+            "orders_by_user": {},
         }
         initiator_name = user.full_name
     else:
         initiator_name = active_sessions[chat_id]["initiator_name"]
 
-    # 重要：sendData() 只有透過「Keyboard Button」開啟才會生效
-    order_url = f"{BASE_URL}/order?chat_id={chat_id}"
-    keyboard = [[KeyboardButton(text="🍽️ 開始點餐", web_app=WebAppInfo(url=order_url))]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
-
-    await update.message.reply_text(
-        f"🍽️ 點餐請按下方按鈕\n（本場發起人：{initiator_name}）",
-        reply_markup=reply_markup,
-    )
-
-    # 「選餐廳」跟「結束點餐」都用 Inline 按鈕，放同一則訊息，避免洗版
     select_url = f"{BASE_URL}/select-restaurant?chat_id={chat_id}"
+    history_url = f"{BASE_URL}/history?chat_id={chat_id}"
+
     inline_markup = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🏠 選擇餐廳（限發起人）", web_app=WebAppInfo(url=select_url))],
+            [InlineKeyboardButton("📋 我的點餐", web_app=WebAppInfo(url=history_url))],
             [InlineKeyboardButton("🛑 結束點餐（限發起人）", callback_data=END_ORDER_CALLBACK)],
         ]
     )
+
     await update.message.reply_text(
-        "發起人請先選擇餐廳，點餐結束後請按下方按鈕結束：",
+        f"🍽️ 點餐開始！（本場發起人：{initiator_name}）\n\n"
+        "發起人請先按「🏠 選擇餐廳」。\n"
+        "選好之後，大家直接在這裡打字點餐即可，格式：\n"
+        "・單品項：品項X數量 金額 備註\n"
+        "　例：牛排X2 300 五分熟\n"
+        "・多品項：品項1 品項2 金額1+金額2 備註\n"
+        "　例：地瓜球 紅茶 30+30 少冰\n"
+        "（同一人重複輸入會覆蓋前一筆訂單）\n\n"
+        "小提醒：之後也可以直接打「/开单」或「/開單」代替 /start，\n"
+        "貼菜單也可以直接打「/新增菜單 餐廳名稱」或「/新增菜单 餐厅名称」代替 /newmenu。",
         reply_markup=inline_markup,
     )
 
 
 # ------------------------------------------------------------------
-# 處理 WebApp 傳回的點餐資料
+# 文字點餐（一般文字訊息）
 # ------------------------------------------------------------------
-async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = update.effective_message.text or ""
+    stripped = text.strip()
+
+    # 中文替代指令：不用打 /start / /newmenu，直接打這兩個也可以（繁簡都支援）
+    if stripped in ("/开单", "/開單"):
+        await start(update, context)
+        return
+    if stripped.startswith("/新增菜单") or stripped.startswith("/新增菜單"):
+        await new_menu(update, context)
+        return
+
     chat_id = update.effective_chat.id
+    user = update.effective_user
+    is_private = update.effective_chat.type == "private"
 
-    if chat_id not in active_sessions:
-        await update.message.reply_text("⚠️ 目前沒有進行中的點餐，請先請一位成員輸入 /start 發起。")
+    session = active_sessions.get(chat_id)
+    if not session or not session.get("restaurant"):
+        if is_private:
+            await update.message.reply_text("目前沒有進行中的點餐，請先 /start（或直接打「/开单」「/開單」）發起。")
+        return  # 群組裡安靜忽略，避免洗版
+
+    parsed = parse_order_text(text)
+    if parsed is None:
+        return  # 不像點餐內容，當一般聊天，安靜忽略
+    if parsed == "MISMATCH":
+        await update.message.reply_text(
+            "⚠️ 品項數量跟金額數量對不起來，請確認格式：\n"
+            "單品項：品項X數量 金額 備註\n"
+            "多品項：品項1 品項2 金額1+金額2 備註"
+        )
         return
 
-    session = active_sessions[chat_id]
+    items, note = parsed
+    summary = record_order(chat_id, user.id, user.full_name, items, note, text)
+    if summary:
+        await update.message.reply_text(summary)
 
-    if not session.get("restaurant"):
-        await update.message.reply_text("⚠️ 發起人還沒選擇餐廳，請稍候。")
+
+# ------------------------------------------------------------------
+# /newmenu 貼上菜單
+# ------------------------------------------------------------------
+async def new_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = update.effective_message.text or ""
+    lines = text.split("\n")
+    first_line = re.sub(r"^/newmenu(@\w+)?\s*", "", lines[0])
+    first_line = re.sub(r"^/新增菜單\s*", "", first_line)
+    first_line = re.sub(r"^/新增菜单\s*", "", first_line).strip()
+
+    if not first_line:
+        await update.message.reply_text(
+            "請用這個格式：\n/newmenu 餐廳名稱\n品項1 金額1\n品項2 金額2\n...\n\n"
+            "（也可以直接打「/新增菜單 餐廳名稱」或「/新增菜单 餐厅名称」代替 /newmenu）"
+        )
         return
 
-    raw_data = update.effective_message.web_app_data.data
-
-    try:
-        order = json.loads(raw_data)
-    except (json.JSONDecodeError, TypeError):
-        logger.exception("無法解析 WebApp 傳回的資料: %s", raw_data)
-        await update.message.reply_text("⚠️ 訂單資料格式錯誤，請重新點餐。")
+    item_lines = [l.strip() for l in lines[1:] if l.strip()]
+    if not item_lines:
+        await update.message.reply_text("沒有偵測到任何菜單品項，請在餐廳名稱下方每行填一個「品項 金額」。")
         return
 
-    items = order.get("items", [])
-    total = order.get("total", 0)
+    items = []
+    failed_lines = []
+    for line in item_lines:
+        m = re.match(r"^(.+?)\s+(\d+(?:\.\d+)?)$", line)
+        if m:
+            items.append({"name": m.group(1).strip(), "price": float(m.group(2))})
+        else:
+            failed_lines.append(line)
 
     if not items:
-        await update.message.reply_text("⚠️ 你的購物車是空的，請至少選擇一項餐點。")
+        await update.message.reply_text("沒有任何一行能成功解析，請確認格式是「品項 金額」，中間用空白隔開。")
         return
 
-    customer_name = update.effective_user.full_name
-    item_strs = [f"{item.get('name', '未知品項')}x{item.get('qty', 0)}" for item in items]
-    summary_text = f"👤{customer_name} 🍽️{'、'.join(item_strs)} 💰NT${total}"
+    restaurants[first_line] = items
 
-    await update.message.reply_text(summary_text)
+    msg = f"✅ 已記住「{first_line}」的菜單，共 {len(items)} 個品項。"
+    if failed_lines:
+        msg += f"\n\n以下 {len(failed_lines)} 行無法辨識，已略過：\n" + "\n".join(failed_lines)
+    await update.message.reply_text(msg)
 
-    session["orders"].append(summary_text)
-    session["grand_total"] += total
-    for item in items:
-        name = item.get("name", "未知品項")
-        qty = item.get("qty", 0)
-        session["items_agg"][name] = session["items_agg"].get(name, 0) + qty
 
-    logger.info("收到新訂單 from %s: %s", update.effective_user.id, order)
+async def admin_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"🔑 後台管理連結：\n{BASE_URL}/admin")
 
 
 # ------------------------------------------------------------------
-# 結束點餐：文字指令 /end（備用）與 Inline 按鈕共用同一套邏輯
+# 結束點餐
 # ------------------------------------------------------------------
 async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -303,15 +441,13 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     session = active_sessions[chat_id]
-
     if user.id != session["initiator_id"]:
         await update.message.reply_text(f"⚠️ 只有發起人「{session['initiator_name']}」可以結束這場點餐。")
         return
 
     final_text = build_final_summary(session)
     del active_sessions[chat_id]
-
-    await update.message.reply_text(final_text, reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(final_text)
 
 
 async def end_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -324,34 +460,20 @@ async def end_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     session = active_sessions[chat_id]
-
     if user.id != session["initiator_id"]:
         await query.answer("你不是開單發起人", show_alert=True)
         return
 
     await query.answer()
-
     final_text = build_final_summary(session)
     del active_sessions[chat_id]
 
     await query.edit_message_reply_markup(reply_markup=None)
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=final_text,
-        reply_markup=ReplyKeyboardRemove(),
-    )
-
-
-async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("請輸入 /start 開始點餐 🍔")
-
-
-async def admin_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"🔑 後台管理連結：\n{BASE_URL}/admin")
+    await context.bot.send_message(chat_id=chat_id, text=final_text)
 
 
 # ------------------------------------------------------------------
-# FastAPI app + 把 Telegram bot 用 polling 方式跑在同一個程式裡
+# FastAPI app + Telegram webhook
 # ------------------------------------------------------------------
 telegram_app: Application | None = None
 
@@ -363,13 +485,11 @@ async def lifespan(app: FastAPI):
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("end", end_session))
     telegram_app.add_handler(CommandHandler("admin", admin_link))
+    telegram_app.add_handler(CommandHandler("newmenu", new_menu))
     telegram_app.add_handler(
         CallbackQueryHandler(end_button_callback, pattern=f"^{END_ORDER_CALLBACK}$")
     )
-    telegram_app.add_handler(
-        MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data)
-    )
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     await telegram_app.initialize()
     await telegram_app.bot.set_webhook(
@@ -391,13 +511,9 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.post("/telegram-webhook")
-async def telegram_webhook(
-    request: Request,
-    x_telegram_bot_api_secret_token: str = Header(default=""),
-):
+async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: str = Header(default="")):
     if x_telegram_bot_api_secret_token != WEBHOOK_SECRET_TOKEN:
         raise HTTPException(403, "invalid secret token")
-
     data = await request.json()
     update = Update.de_json(data=data, bot=telegram_app.bot)
     await telegram_app.process_update(update)
@@ -406,21 +522,19 @@ async def telegram_webhook(
 
 @app.get("/health")
 async def health():
-    # 給 UptimeRobot / cron-job.org 這類保活服務定時打的端點，
-    # 每 10 分鐘打一次，就能避免 Render 免費方案 15 分鐘沒流量自動休眠
     return {"status": "ok"}
 
 
 # ---------------- 頁面 ----------------
 
-@app.get("/order")
-async def order_page():
-    return FileResponse(STATIC_DIR / "order.html")
-
-
 @app.get("/select-restaurant")
 async def select_restaurant_page():
     return FileResponse(STATIC_DIR / "select_restaurant.html")
+
+
+@app.get("/history")
+async def history_page():
+    return FileResponse(STATIC_DIR / "history.html")
 
 
 @app.get("/admin")
@@ -428,7 +542,7 @@ async def admin_page():
     return FileResponse(STATIC_DIR / "admin.html")
 
 
-# ---------------- 公開讀取 API（點餐頁面 / 選餐廳頁面用） ----------------
+# ---------------- 公開讀取 API ----------------
 
 @app.get("/api/restaurants")
 async def api_list_restaurants():
@@ -447,25 +561,18 @@ async def api_get_session(chat_id: int):
     session = active_sessions.get(chat_id)
     if not session:
         return {"active": False}
-    return {
-        "active": True,
-        "restaurant": session["restaurant"],
-    }
+    return {"active": True, "restaurant": session["restaurant"]}
 
 
 @app.get("/api/session/{chat_id}/is-initiator")
 async def api_is_initiator(chat_id: int, x_telegram_init_data: str = Header(default="")):
-    validated = validate_init_data(x_telegram_init_data, BOT_TOKEN)
-    if not validated or not validated.get("user"):
-        raise HTTPException(401, "無法驗證身份，請透過 Telegram 開啟此頁面")
-
+    tg_user = require_telegram_user(x_telegram_init_data)
     session = active_sessions.get(chat_id)
     if not session:
         return {"active": False, "is_initiator": False}
-
     return {
         "active": True,
-        "is_initiator": validated["user"]["id"] == session["initiator_id"],
+        "is_initiator": tg_user["id"] == session["initiator_id"],
         "restaurant": session["restaurant"],
     }
 
@@ -476,27 +583,108 @@ class SelectRestaurantBody(BaseModel):
 
 @app.post("/api/session/{chat_id}/restaurant")
 async def api_select_restaurant(
-    chat_id: int,
-    body: SelectRestaurantBody,
-    x_telegram_init_data: str = Header(default=""),
+    chat_id: int, body: SelectRestaurantBody, x_telegram_init_data: str = Header(default="")
 ):
-    validated = validate_init_data(x_telegram_init_data, BOT_TOKEN)
-    if not validated or not validated.get("user"):
-        raise HTTPException(401, "無法驗證身份，請透過 Telegram 開啟此頁面")
-
-    telegram_user_id = validated["user"]["id"]
-
+    tg_user = require_telegram_user(x_telegram_init_data)
     session = active_sessions.get(chat_id)
     if not session:
         raise HTTPException(404, "找不到進行中的點餐場次")
-
-    if telegram_user_id != session["initiator_id"]:
+    if tg_user["id"] != session["initiator_id"]:
         raise HTTPException(403, "只有發起人可以選擇餐廳")
-
     if body.restaurant not in restaurants:
         raise HTTPException(400, "餐廳不存在")
-
     session["restaurant"] = body.restaurant
+    return {"ok": True}
+
+
+# ---------------- 我的點餐 API ----------------
+
+@app.get("/api/session/{chat_id}/my-order")
+async def api_get_my_order(chat_id: int, x_telegram_init_data: str = Header(default="")):
+    tg_user = require_telegram_user(x_telegram_init_data)
+    session = active_sessions.get(chat_id)
+    if not session:
+        return {"active": False, "order": None}
+    record = session["orders_by_user"].get(tg_user["id"])
+    return {"active": True, "order": record}
+
+
+class UpsertOrderBody(BaseModel):
+    raw_text: str
+
+
+@app.post("/api/session/{chat_id}/my-order")
+async def api_upsert_my_order(
+    chat_id: int, body: UpsertOrderBody, x_telegram_init_data: str = Header(default="")
+):
+    tg_user = require_telegram_user(x_telegram_init_data)
+    session = active_sessions.get(chat_id)
+    if not session or not session.get("restaurant"):
+        raise HTTPException(404, "目前沒有進行中的點餐，或發起人還沒選餐廳")
+
+    parsed = parse_order_text(body.raw_text)
+    if parsed is None or parsed == "MISMATCH":
+        raise HTTPException(400, "格式無法解析，請確認「品項 金額 備註」的格式")
+
+    items, note = parsed
+    user_name = tg_user.get("first_name", "") + (
+        f" {tg_user['last_name']}" if tg_user.get("last_name") else ""
+    )
+    summary = record_order(chat_id, tg_user["id"], user_name.strip() or "使用者", items, note, body.raw_text)
+
+    if summary and telegram_app:
+        await telegram_app.bot.send_message(chat_id=chat_id, text=f"✏️ {summary}")
+
+    return {"ok": True}
+
+
+@app.post("/api/session/{chat_id}/my-order/delete")
+async def api_delete_my_order(chat_id: int, x_telegram_init_data: str = Header(default="")):
+    tg_user = require_telegram_user(x_telegram_init_data)
+    session = active_sessions.get(chat_id)
+    if not session:
+        raise HTTPException(404, "目前沒有進行中的點餐")
+
+    record = session["orders_by_user"].pop(tg_user["id"], None)
+    if record and telegram_app:
+        await telegram_app.bot.send_message(
+            chat_id=chat_id, text=f"❌ {record['user_name']} 已取消訂單"
+        )
+    return {"ok": True}
+
+
+@app.get("/api/my-history")
+async def api_get_my_history(x_telegram_init_data: str = Header(default="")):
+    tg_user = require_telegram_user(x_telegram_init_data)
+    return {"history": user_history.get(tg_user["id"], [])}
+
+
+class ReorderBody(BaseModel):
+    raw_text: str
+
+
+@app.post("/api/session/{chat_id}/order-from-history")
+async def api_order_from_history(
+    chat_id: int, body: ReorderBody, x_telegram_init_data: str = Header(default="")
+):
+    tg_user = require_telegram_user(x_telegram_init_data)
+    session = active_sessions.get(chat_id)
+    if not session or not session.get("restaurant"):
+        raise HTTPException(404, "目前沒有進行中的點餐，或發起人還沒選餐廳")
+
+    parsed = parse_order_text(body.raw_text)
+    if parsed is None or parsed == "MISMATCH":
+        raise HTTPException(400, "這筆歷史紀錄格式異常，無法重新送出")
+
+    items, note = parsed
+    user_name = tg_user.get("first_name", "") + (
+        f" {tg_user['last_name']}" if tg_user.get("last_name") else ""
+    )
+    summary = record_order(chat_id, tg_user["id"], user_name.strip() or "使用者", items, note, body.raw_text)
+
+    if summary and telegram_app:
+        await telegram_app.bot.send_message(chat_id=chat_id, text=summary)
+
     return {"ok": True}
 
 
@@ -524,7 +712,6 @@ async def api_add_restaurant(body: NewRestaurantBody, x_admin_password: str = He
 
 
 class MenuItemBody(BaseModel):
-    category: str = "未分類"
     name: str
     price: float
 
@@ -534,78 +721,12 @@ class SaveMenuBody(BaseModel):
 
 
 @app.post("/api/admin/menu/{restaurant}")
-async def api_save_menu(
-    restaurant: str, body: SaveMenuBody, x_admin_password: str = Header(default="")
-):
+async def api_save_menu(restaurant: str, body: SaveMenuBody, x_admin_password: str = Header(default="")):
     check_admin_password(x_admin_password)
     if restaurant not in restaurants:
         raise HTTPException(404, "餐廳不存在，請先新增餐廳")
     restaurants[restaurant] = [item.dict() for item in body.items]
     return {"ok": True, "count": len(body.items)}
-
-
-class OcrBody(BaseModel):
-    image_base64: str
-
-
-@app.post("/api/admin/menu/ocr")
-async def api_menu_ocr(body: OcrBody, x_admin_password: str = Header(default="")):
-    check_admin_password(x_admin_password)
-
-    image_data = body.image_base64
-    if image_data.startswith("data:") and "," in image_data:
-        image_data = image_data.split(",", 1)[1]
-
-    prompt = (
-        "這是一張餐廳菜單的照片。請幫我辨識上面的每一個品項，"
-        "輸出成 JSON 陣列，每個元素要有：\n"
-        "- name：品項名稱（繁體中文）\n"
-        "- price：數字，只留數字，不要貨幣符號或逗號\n"
-        "- category：這個品項的分類（例如主食、小菜、飲料），"
-        "如果看不出分類就填「未分類」\n"
-        "只回傳 JSON 陣列本身，不要有其他說明文字，也不要用 markdown 的 ``` 包起來。"
-    )
-
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt},
-                    {"inline_data": {"mime_type": "image/jpeg", "data": image_data}},
-                ]
-            }
-        ]
-    }
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-
-    if resp.status_code != 200:
-        logger.error("Gemini API 錯誤: %s", resp.text)
-        raise HTTPException(502, f"AI 辨識失敗：{resp.text[:200]}")
-
-    data = resp.json()
-    try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError):
-        raise HTTPException(502, "AI 回傳格式異常，請改用手動輸入")
-
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-
-    try:
-        items = json.loads(cleaned)
-    except json.JSONDecodeError:
-        logger.error("Gemini 回傳無法解析: %s", text)
-        raise HTTPException(502, "AI 回傳的內容無法解析，請改用手動輸入或重新拍一張更清楚的照片")
-
-    return {"items": items}
 
 
 @app.exception_handler(HTTPException)
