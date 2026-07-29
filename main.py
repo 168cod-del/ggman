@@ -539,6 +539,12 @@ async def end_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 telegram_app: Application | None = None
 
 
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # 任何一個訊息處理失敗，都只記錄下來，絕對不能讓整個服務跟著崩潰
+    # （崩潰會導致 webhook 被意外取消設定，之後所有訊息都收不到）
+    logger.exception("處理更新時發生未預期的錯誤", exc_info=context.error)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global telegram_app
@@ -555,6 +561,7 @@ async def lifespan(app: FastAPI):
     )
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
+    telegram_app.add_error_handler(global_error_handler)
 
     await telegram_app.initialize()
 
@@ -584,14 +591,36 @@ app = FastAPI(lifespan=lifespan)
 async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: str = Header(default="")):
     if x_telegram_bot_api_secret_token != WEBHOOK_SECRET_TOKEN:
         raise HTTPException(403, "invalid secret token")
+
     data = await request.json()
     update = Update.de_json(data=data, bot=telegram_app.bot)
-    await telegram_app.process_update(update)
+
+    try:
+        await telegram_app.process_update(update)
+    except Exception:
+        # 保底防護：就算 process_update 本身出了意料之外的錯誤，
+        # 這個請求還是要正常回 200，絕對不能讓例外往上傳、拖垮整個服務
+        logger.exception("webhook 處理更新時發生錯誤")
+
     return {"ok": True}
 
 
 @app.get("/health")
 async def health():
+    # 順便檢查 webhook 有沒有還在，萬一之前某次意外被取消設定，
+    # 這裡會自動補回去（搭配 UptimeRobot 之類的保活服務定期呼叫這個端點）
+    try:
+        info = await telegram_app.bot.get_webhook_info()
+        if not info.url:
+            logger.warning("偵測到 webhook 網址是空的，自動重新設定")
+            await telegram_app.bot.set_webhook(
+                url=f"{BASE_URL}/telegram-webhook",
+                secret_token=WEBHOOK_SECRET_TOKEN,
+                allowed_updates=Update.ALL_TYPES,
+            )
+    except Exception:
+        logger.exception("健康檢查時嘗試修復 webhook 失敗")
+
     return {"status": "ok"}
 
 
