@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>菜單後台管理</title>
+<title>餐廳後台管理</title>
 <style>
   :root{
     --bg: #1b1f1d;
@@ -29,7 +29,7 @@
     margin-bottom: 16px; border: 1px solid var(--line);
   }
 
-  input[type="text"], input[type="number"], select{
+  input[type="text"]{
     width: 100%; padding: 10px 12px; border-radius: 8px;
     border: 1px solid var(--line); background: #141817; color: var(--text);
     font-size: 14px; margin-bottom: 8px;
@@ -40,16 +40,16 @@
   }
   .btn-primary{ background: var(--accent); color: #2b1d05; }
   .btn-danger{ background: var(--danger); color: #fff; }
-  .btn-secondary{ background: var(--line); color: var(--text); }
 
   .row{ display:flex; gap: 8px; }
-  .row input{ flex:1; }
+  .row input{ flex:1; margin-bottom:0; }
 
-  table{ width:100%; border-collapse: collapse; margin-top: 10px; }
-  th, td{ padding: 6px 4px; text-align:left; font-size: 13px; }
+  table{ width:100%; border-collapse: collapse; margin-top: 6px; }
+  th, td{ padding: 8px 4px; text-align:left; font-size: 13px; }
   th{ color: var(--dim); font-weight: 500; border-bottom: 1px solid var(--line); }
-  td input{ margin:0; padding: 6px 8px; font-size: 13px; }
-  td.col-del{ width: 32px; text-align:center; }
+  td{ border-bottom: 1px solid var(--line); }
+  .status-yes{ color: #7cb87c; }
+  .status-no{ color: var(--dim); }
 
   #password-gate{
     position: fixed; inset:0; background: var(--bg);
@@ -60,28 +60,26 @@
   .msg{ font-size: 13px; margin-top: 8px; }
   .msg.error{ color: var(--danger); }
   .msg.success{ color: #7cb87c; }
-
-  .disabled-overlay{ opacity: .4; pointer-events: none; }
 </style>
 </head>
 <body>
 
 <div id="password-gate">
-  <h1>🔑 菜單後台</h1>
+  <h1>🔑 餐廳後台</h1>
   <input type="text" id="password-input" placeholder="請輸入後台密碼" />
   <button class="btn-primary" onclick="checkPassword()">進入</button>
   <div class="msg error" id="password-msg"></div>
 </div>
 
 <div id="main-content" style="display:none;">
-  <h1>🍽️ 菜單後台管理</h1>
+  <h1>🍽️ 餐廳後台管理</h1>
   <p class="hint">
-    平常建議直接在 Telegram 用 <code>/newmenu</code> 貼上菜單即可，
-    這裡是備用的手動校正工具（改錯字、改金額）。資料存在伺服器記憶體中，重新部署會重置。
+    平常新增餐廳建議直接在 Telegram 打「/新增菜單 餐廳名稱」，接著上傳一張菜單照片即可。<br/>
+    這裡只是輔助查看目前有哪些餐廳、有沒有照片，以及刪除餐廳用。資料存在伺服器記憶體中，重新部署會重置。
   </p>
 
   <div class="panel">
-    <h2>① 新增餐廳</h2>
+    <h2>新增空白餐廳（之後仍需在 Telegram 補上傳照片）</h2>
     <div class="row">
       <input type="text" id="new-restaurant-name" placeholder="餐廳名稱" />
       <button class="btn-primary" onclick="addRestaurant()">新增</button>
@@ -90,32 +88,16 @@
   </div>
 
   <div class="panel">
-    <h2>② 選擇要編輯菜單的餐廳</h2>
-    <select id="restaurant-select" onchange="onRestaurantChange()">
-      <option value="">請選擇餐廳...</option>
-    </select>
-  </div>
-
-  <div class="panel disabled-overlay" id="menu-panel">
-    <h2>③ 菜單明細（可手動新增 / 修改 / 刪除）</h2>
-    <p class="hint">請先選擇上方的餐廳，才能編輯菜單</p>
+    <h2>目前的餐廳清單</h2>
     <table>
-      <thead>
-        <tr><th>品項名稱</th><th>價格</th><th></th></tr>
-      </thead>
-      <tbody id="menu-tbody"></tbody>
+      <thead><tr><th>餐廳名稱</th><th>菜單照片</th><th></th></tr></thead>
+      <tbody id="restaurant-tbody"></tbody>
     </table>
-    <button class="btn-secondary" onclick="addEmptyRow()" style="margin-top:8px;">＋ 新增一列</button>
-    <div style="margin-top:16px;">
-      <button class="btn-primary" onclick="saveMenu()">💾 儲存菜單</button>
-    </div>
-    <div class="msg" id="save-menu-msg"></div>
   </div>
 </div>
 
 <script>
   let ADMIN_PASSWORD = "";
-  let currentRestaurant = "";
 
   function checkPassword(){
     ADMIN_PASSWORD = document.getElementById("password-input").value;
@@ -124,9 +106,15 @@
     loadRestaurants();
   }
 
-  async function apiGet(path){
-    const res = await fetch(path);
+  async function apiGetAdmin(path){
+    const res = await fetch(path, { headers: { "X-Admin-Password": ADMIN_PASSWORD } });
     const data = await res.json();
+    if(res.status === 401){
+      document.getElementById("password-gate").style.display = "flex";
+      document.getElementById("main-content").style.display = "none";
+      document.getElementById("password-msg").textContent = "密碼錯誤，請重新輸入";
+      throw new Error("密碼錯誤");
+    }
     if(!res.ok) throw new Error(data.detail || "request failed");
     return data;
   }
@@ -150,11 +138,24 @@
 
   async function loadRestaurants(){
     try{
-      const data = await apiGet("/api/restaurants");
-      const select = document.getElementById("restaurant-select");
-      select.innerHTML = '<option value="">請選擇餐廳...</option>' +
-        data.restaurants.map(name => `<option value="${name}">${name}</option>`).join("");
+      const data = await apiGetAdmin("/api/admin/restaurants");
+      renderTable(data.restaurants);
     } catch(e){ console.error(e); }
+  }
+
+  function renderTable(restaurants){
+    const tbody = document.getElementById("restaurant-tbody");
+    if(restaurants.length === 0){
+      tbody.innerHTML = `<tr><td colspan="3">目前還沒有任何餐廳</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = restaurants.map(r => `
+      <tr>
+        <td>${r.name}</td>
+        <td class="${r.has_photo ? 'status-yes' : 'status-no'}">${r.has_photo ? '✅ 已上傳' : '— 尚未上傳'}</td>
+        <td><button class="btn-danger" onclick="deleteRestaurant('${r.name.replace(/'/g, "\\'")}')">刪除</button></td>
+      </tr>
+    `).join("");
   }
 
   async function addRestaurant(){
@@ -168,7 +169,7 @@
     }
     try{
       await apiPostAdmin("/api/admin/restaurants", { name });
-      msgEl.textContent = `已新增「${name}」`;
+      msgEl.textContent = `已新增「${name}」，記得在 Telegram 補上傳菜單照片`;
       msgEl.className = "msg success";
       nameInput.value = "";
       await loadRestaurants();
@@ -178,64 +179,13 @@
     }
   }
 
-  async function onRestaurantChange(){
-    currentRestaurant = document.getElementById("restaurant-select").value;
-    const menuPanel = document.getElementById("menu-panel");
-    if(!currentRestaurant){
-      menuPanel.classList.add("disabled-overlay");
-      return;
-    }
-    menuPanel.classList.remove("disabled-overlay");
+  async function deleteRestaurant(name){
+    if(!confirm(`確定要刪除「${name}」嗎？`)) return;
     try{
-      const data = await apiGet(`/api/menu/${encodeURIComponent(currentRestaurant)}`);
-      renderMenuTable(data.items);
+      await apiPostAdmin("/api/admin/restaurants/delete", { name });
+      await loadRestaurants();
     } catch(e){
-      renderMenuTable([]);
-    }
-  }
-
-  function renderMenuTable(items){
-    const tbody = document.getElementById("menu-tbody");
-    tbody.innerHTML = "";
-    items.forEach(item => addRow(item.name, item.price));
-    if(items.length === 0) addEmptyRow();
-  }
-
-  function addRow(name = "", price = ""){
-    const tbody = document.getElementById("menu-tbody");
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td><input type="text" class="cell-name" value="${name}" /></td>
-      <td><input type="number" class="cell-price" value="${price}" /></td>
-      <td class="col-del"><button class="btn-danger" onclick="this.closest('tr').remove()">✕</button></td>
-    `;
-    tbody.appendChild(tr);
-  }
-
-  function addEmptyRow(){ addRow(); }
-
-  function collectRows(){
-    return Array.from(document.querySelectorAll("#menu-tbody tr")).map(tr => ({
-      name: tr.querySelector(".cell-name").value.trim(),
-      price: parseFloat(tr.querySelector(".cell-price").value) || 0,
-    })).filter(item => item.name);
-  }
-
-  async function saveMenu(){
-    const msgEl = document.getElementById("save-menu-msg");
-    if(!currentRestaurant){
-      msgEl.textContent = "請先選擇餐廳";
-      msgEl.className = "msg error";
-      return;
-    }
-    const items = collectRows();
-    try{
-      const result = await apiPostAdmin(`/api/admin/menu/${encodeURIComponent(currentRestaurant)}`, { items });
-      msgEl.textContent = `已儲存 ${result.count} 個品項`;
-      msgEl.className = "msg success";
-    } catch(e){
-      msgEl.textContent = e.message;
-      msgEl.className = "msg error";
+      alert(e.message);
     }
   }
 </script>

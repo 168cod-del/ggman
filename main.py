@@ -12,10 +12,11 @@ Telegram 點餐 Bot 後端（文字點餐版）
    - /api/...           給以上頁面呼叫的資料介面
 
 功能總覽：
-1. /start
-   - 該聊天室第一個打 /start 的人 = 本場「發起人」
+1. /start（或「/开单」「/開單」）
+   - 該聊天室第一個發起的人 = 本場「發起人」
    - 顯示使用說明 + 三顆 Inline 按鈕：選擇餐廳／我的點餐／結束點餐
-2. 發起人用「🏠 選擇餐廳」選好餐廳（滾輪式選單）
+2. 發起人用「🏠 選擇餐廳」選好餐廳（滾輪式選單），選定後會把該餐廳的
+   菜單照片直接發到聊天室，讓大家對照著點餐
 3. 大家直接在聊天室打字點餐，支援兩種格式：
    單品項：品項X數量 金額 [備註]        例：牛排X2 300 五分熟
    多品項：品項1 品項2 ... 金額1+金額2...[備註]   例：地瓜球 紅茶 30+30 少冰
@@ -24,17 +25,26 @@ Telegram 點餐 Bot 後端（文字點餐版）
 4. 使用者可以打開「📋 我的點餐」Mini App，修改/刪除本場自己的訂單，
    或從最近 4 筆常用紀錄快速重新送出
 5. 發起人按「🛑 結束點餐」：顯示每人明細 + 品項彙總、清除場次記憶
-6. /newmenu 餐廳名稱 + 下面每行「品項 金額」→ 自動記住這間餐廳的菜單
-   （之後選餐廳時就能選到）
-7. /admin 後台：新增餐廳、手動編輯菜單（當作 /newmenu 之後校正錯字/金額用）
+6. /newmenu 餐廳名稱（或「/新增菜單 餐廳名稱」「/新增菜单 餐厅名称」）
+   → bot 會請「發出這個指令的人」接著上傳一張菜單照片，
+   上傳成功才算真的新增完成（不需要再打任何品項文字）
+7. /admin 後台：查看目前有哪些餐廳、有沒有菜單照片、可以刪除餐廳
+
+嚴格的回應規則（很重要）：
+- 只有「/start /开单 /開單 /end /admin /newmenu /新增菜單 /新增菜单」這些指令，
+  以及「剛打完新增菜單指令的那個人所上傳的下一張照片」，bot 才會在任何時候回應。
+- 除此之外，只有在該聊天室「有正在進行中的點餐場次，且已選好餐廳」時，
+  bot 才會嘗試把文字訊息解析成「品項 金額 備註」的點餐內容；
+  解析不出來的一般聊天一律安靜忽略，不回應、不打擾。
+- 沒有任何進行中場次時，群組裡的其他任何訊息（包含沒有配對到的照片）一律不理會。
 
 注意：
-- 場次記憶、餐廳/菜單資料、使用者個人歷史，目前都存在「記憶體」裡，
-  這支程式一重啟（Render 重新部署）就會清空。
+- 場次記憶、餐廳/菜單資料、使用者個人歷史、新增菜單的暫存狀態，
+  目前都存在「記憶體」裡，這支程式一重啟（Render 重新部署）就會清空。
   等之後要正式上線、資料不能不見的話，要幫你接上真正的資料庫。
-- 因為點餐現在是直接看群組裡的文字訊息辨識，
+- 因為點餐是直接看群組裡的文字訊息辨識，
   bot 必須關閉 Telegram 的隱私模式（BotFather → /setprivacy → Disable），
-  否則群組裡的一般文字訊息不會被 bot 收到。
+  否則群組裡的一般文字訊息（包含點餐內容）不會被 bot 收到。
 """
 
 from __future__ import annotations
@@ -97,34 +107,20 @@ STATIC_DIR = BASE_DIR  # html 檔案跟 main.py 放同一層
 # 資料儲存（記憶體版本）
 # ------------------------------------------------------------------
 
-# restaurants: { 餐廳名稱: [ {name, price}, ... ] }
-restaurants: dict[str, list[dict]] = {
-    "阿明快炒": [
-        {"name": "客家小炒", "price": 180},
-        {"name": "宮保雞丁", "price": 160},
-        {"name": "酸辣湯", "price": 60},
-    ],
-    "巷口便當": [
-        {"name": "招牌雞腿便當", "price": 100},
-        {"name": "排骨便當", "price": 90},
-        {"name": "貢丸湯", "price": 20},
-    ],
-    "涼夏冷飲": [
-        {"name": "古早味紅茶", "price": 25},
-        {"name": "冬瓜檸檬", "price": 35},
-        {"name": "百香雙響炮", "price": 50},
-    ],
-    "深夜燒烤": [
-        {"name": "雞屁股", "price": 30},
-        {"name": "杏鮑菇", "price": 35},
-        {"name": "台灣啤酒", "price": 80},
-    ],
-    "晨光早餐店": [
-        {"name": "招牌蛋餅", "price": 35},
-        {"name": "總匯吐司", "price": 55},
-        {"name": "大冰奶", "price": 30},
-    ],
+# restaurants: { 餐廳名稱: {"photo_file_id": str | None} }
+restaurants: dict[str, dict] = {
+    "阿明快炒": {"photo_file_id": None},
+    "巷口便當": {"photo_file_id": None},
+    "涼夏冷飲": {"photo_file_id": None},
+    "深夜燒烤": {"photo_file_id": None},
+    "晨光早餐店": {"photo_file_id": None},
 }
+# 這 5 間是測試用的預設餐廳，還沒有菜單照片；
+# 想要有照片可以直接用 /新增菜單 重新加一次（同名會覆蓋）
+
+# pending_menu_uploads: { user_id: 餐廳名稱 }
+# 記錄「剛打完新增菜單指令、正在等待上傳菜單照片」的人
+pending_menu_uploads: dict[int, str] = {}
 
 # active_sessions: { chat_id: {
 #   "initiator_id": int,
@@ -387,42 +383,38 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ------------------------------------------------------------------
 async def new_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.effective_message.text or ""
-    lines = text.split("\n")
-    first_line = re.sub(r"^/newmenu(@\w+)?\s*", "", lines[0])
+    first_line = re.sub(r"^/newmenu(@\w+)?\s*", "", text)
     first_line = re.sub(r"^/新增菜單\s*", "", first_line)
     first_line = re.sub(r"^/新增菜单\s*", "", first_line).strip()
 
     if not first_line:
         await update.message.reply_text(
-            "請用這個格式：\n/newmenu 餐廳名稱\n品項1 金額1\n品項2 金額2\n...\n\n"
-            "（也可以直接打「/新增菜單 餐廳名稱」或「/新增菜单 餐厅名称」代替 /newmenu）"
+            "請用這個格式：\n/newmenu 餐廳名稱\n\n"
+            "（也可以直接打「/新增菜單 餐廳名稱」或「/新增菜单 餐厅名称」代替 /newmenu，"
+            "不用加任何品項文字）"
         )
         return
 
-    item_lines = [l.strip() for l in lines[1:] if l.strip()]
-    if not item_lines:
-        await update.message.reply_text("沒有偵測到任何菜單品項，請在餐廳名稱下方每行填一個「品項 金額」。")
-        return
+    restaurant_name = first_line
+    pending_menu_uploads[update.effective_user.id] = restaurant_name
 
-    items = []
-    failed_lines = []
-    for line in item_lines:
-        m = re.match(r"^(.+?)\s+(\d+(?:\.\d+)?)$", line)
-        if m:
-            items.append({"name": m.group(1).strip(), "price": float(m.group(2))})
-        else:
-            failed_lines.append(line)
+    await update.message.reply_text(
+        f"📷 請直接上傳「{restaurant_name}」的菜單照片（傳一張圖片過來即可），"
+        "上傳成功後才算真的新增完成。"
+    )
 
-    if not items:
-        await update.message.reply_text("沒有任何一行能成功解析，請確認格式是「品項 金額」，中間用空白隔開。")
-        return
 
-    restaurants[first_line] = items
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    restaurant_name = pending_menu_uploads.get(user_id)
+    if not restaurant_name:
+        return  # 沒有人在等待上傳菜單照片，完全不理會，避免亂反應
 
-    msg = f"✅ 已記住「{first_line}」的菜單，共 {len(items)} 個品項。"
-    if failed_lines:
-        msg += f"\n\n以下 {len(failed_lines)} 行無法辨識，已略過：\n" + "\n".join(failed_lines)
-    await update.message.reply_text(msg)
+    photo = update.effective_message.photo[-1]  # 取最大尺寸
+    restaurants[restaurant_name] = {"photo_file_id": photo.file_id}
+    del pending_menu_uploads[user_id]
+
+    await update.message.reply_text(f"✅ 已新增「{restaurant_name}」，菜單照片已儲存。")
 
 
 async def admin_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -490,6 +482,7 @@ async def lifespan(app: FastAPI):
         CallbackQueryHandler(end_button_callback, pattern=f"^{END_ORDER_CALLBACK}$")
     )
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
 
     await telegram_app.initialize()
     await telegram_app.bot.set_webhook(
@@ -553,7 +546,7 @@ async def api_list_restaurants():
 async def api_get_menu(restaurant: str):
     if restaurant not in restaurants:
         raise HTTPException(404, "餐廳不存在")
-    return {"restaurant": restaurant, "items": restaurants[restaurant]}
+    return {"restaurant": restaurant, "has_photo": bool(restaurants[restaurant].get("photo_file_id"))}
 
 
 @app.get("/api/session/{chat_id}")
@@ -593,7 +586,23 @@ async def api_select_restaurant(
         raise HTTPException(403, "只有發起人可以選擇餐廳")
     if body.restaurant not in restaurants:
         raise HTTPException(400, "餐廳不存在")
+
     session["restaurant"] = body.restaurant
+
+    photo_file_id = restaurants[body.restaurant].get("photo_file_id")
+    if telegram_app:
+        if photo_file_id:
+            await telegram_app.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_file_id,
+                caption=f"🍽️ {body.restaurant} 菜單，請大家對照著點餐",
+            )
+        else:
+            await telegram_app.bot.send_message(
+                chat_id=chat_id,
+                text=f"🏠 已選擇「{body.restaurant}」（這間餐廳目前還沒有菜單照片）",
+            )
+
     return {"ok": True}
 
 
@@ -707,26 +716,32 @@ async def api_add_restaurant(body: NewRestaurantBody, x_admin_password: str = He
         raise HTTPException(400, "餐廳名稱不能空白")
     if name in restaurants:
         raise HTTPException(400, "這間餐廳已經存在")
-    restaurants[name] = []
+    restaurants[name] = {"photo_file_id": None}
     return {"ok": True}
 
 
-class MenuItemBody(BaseModel):
-    name: str
-    price: float
-
-
-class SaveMenuBody(BaseModel):
-    items: list[MenuItemBody]
-
-
-@app.post("/api/admin/menu/{restaurant}")
-async def api_save_menu(restaurant: str, body: SaveMenuBody, x_admin_password: str = Header(default="")):
+@app.get("/api/admin/restaurants")
+async def api_admin_list_restaurants(x_admin_password: str = Header(default="")):
     check_admin_password(x_admin_password)
-    if restaurant not in restaurants:
-        raise HTTPException(404, "餐廳不存在，請先新增餐廳")
-    restaurants[restaurant] = [item.dict() for item in body.items]
-    return {"ok": True, "count": len(body.items)}
+    return {
+        "restaurants": [
+            {"name": name, "has_photo": bool(data.get("photo_file_id"))}
+            for name, data in restaurants.items()
+        ]
+    }
+
+
+class DeleteRestaurantBody(BaseModel):
+    name: str
+
+
+@app.post("/api/admin/restaurants/delete")
+async def api_delete_restaurant(body: DeleteRestaurantBody, x_admin_password: str = Header(default="")):
+    check_admin_password(x_admin_password)
+    if body.name not in restaurants:
+        raise HTTPException(404, "餐廳不存在")
+    del restaurants[body.name]
+    return {"ok": True}
 
 
 @app.exception_handler(HTTPException)
