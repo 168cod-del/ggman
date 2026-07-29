@@ -70,11 +70,11 @@ BOT_TOKEN = "8396988188:AAHnH2wRRu0IpnMB7gicvqwXc6bB8f-axso"
 
 # 部署到 Render 拿到網址後，把這裡換成那個網址
 # 例如 https://ggman.onrender.com（不要加結尾斜線）
-BASE_URL = "https://your-app.onrender.com"
+BASE_URL = "https://ggman.onrender.com"
 
 # Telegram webhook 用的密鑰，隨便打一串英數字就好，不用跟任何人說
 # （Telegram 每次推訊息過來都會帶著這組密鑰，用來確認真的是 Telegram 送來的）
-WEBHOOK_SECRET_TOKEN = "please-change-this-to-a-random-string"
+WEBHOOK_SECRET_TOKEN = "3d5503dd54239bc4e701d1645cb9e456"
 
 # 後台管理密碼：可以自己改成想要的密碼，/admin 頁面會用這組密碼保護
 ADMIN_PASSWORD = "changeme123"
