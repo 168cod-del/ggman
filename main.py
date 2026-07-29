@@ -579,7 +579,11 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await telegram_app.bot.delete_webhook()
+    # 注意：這裡故意「不」呼叫 bot.delete_webhook()。
+    # Render 免費方案閒置一段時間會自動暫停服務，暫停時一樣會觸發這段關閉流程；
+    # 如果這裡把 webhook 刪掉，Telegram 手上就沒有網址了，
+    # 之後「有新訊息時自動把休眠服務叫醒」這個機制會整個失效，
+    # 只能手動重新部署才能恢復——這正是之前反覆斷線的根本原因。
     await telegram_app.stop()
     await telegram_app.shutdown()
 
