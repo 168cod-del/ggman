@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>菜單後台管理</title>
+<style>
+  :root{
+    --bg: #1b1f1d;
+    --panel: #242a27;
+    --text: #f2ede1;
+    --dim: #9aa39c;
+    --accent: #e8a33d;
+    --danger: #c0392b;
+    --line: #333c37;
+  }
+  *{ box-sizing: border-box; }
+  body{
+    margin:0; padding: 24px 16px 80px;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Noto Sans TC", sans-serif;
+  }
+  h1{ font-size: 20px; margin: 0 0 4px; }
+  h2{ font-size: 15px; margin: 0 0 10px; color: var(--accent); }
+  p.hint{ font-size: 12.5px; color: var(--dim); margin: 0 0 16px; }
+
+  .panel{
+    background: var(--panel); border-radius: 14px; padding: 16px;
+    margin-bottom: 16px; border: 1px solid var(--line);
+  }
+
+  input[type="text"], input[type="number"], select{
+    width: 100%; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: #141817; color: var(--text);
+    font-size: 14px; margin-bottom: 8px;
+  }
+  button{
+    border: none; border-radius: 8px; padding: 10px 16px;
+    font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .btn-primary{ background: var(--accent); color: #2b1d05; }
+  .btn-danger{ background: var(--danger); color: #fff; }
+  .btn-secondary{ background: var(--line); color: var(--text); }
+  button:disabled{ opacity: .4; cursor: not-allowed; }
+
+  .row{ display:flex; gap: 8px; }
+  .row input{ flex:1; }
+
+  table{ width:100%; border-collapse: collapse; margin-top: 10px; }
+  th, td{ padding: 6px 4px; text-align:left; font-size: 13px; }
+  th{ color: var(--dim); font-weight: 500; border-bottom: 1px solid var(--line); }
+  td input{ margin:0; padding: 6px 8px; font-size: 13px; }
+  td.col-del{ width: 32px; text-align:center; }
+
+  #password-gate{
+    position: fixed; inset:0; background: var(--bg);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap: 12px; z-index: 100; padding: 24px;
+  }
+  #password-gate input{ max-width: 260px; }
+  .msg{ font-size: 13px; margin-top: 8px; }
+  .msg.error{ color: var(--danger); }
+  .msg.success{ color: #7cb87c; }
+
+  .disabled-overlay{ opacity: .4; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div id="password-gate">
+  <h1>🔑 菜單後台</h1>
+  <input type="text" id="password-input" placeholder="請輸入後台密碼" />
+  <button class="btn-primary" onclick="checkPassword()">進入</button>
+  <div class="msg error" id="password-msg"></div>
+</div>
+
+<div id="main-content" style="display:none;">
+  <h1>🍽️ 菜單後台管理</h1>
+  <p class="hint">目前資料存在伺服器記憶體中，重新部署會重置。</p>
+
+  <div class="panel">
+    <h2>① 新增餐廳</h2>
+    <div class="row">
+      <input type="text" id="new-restaurant-name" placeholder="餐廳名稱" />
+      <button class="btn-primary" onclick="addRestaurant()">新增</button>
+    </div>
+    <div class="msg" id="add-restaurant-msg"></div>
+  </div>
+
+  <div class="panel">
+    <h2>② 選擇要編輯菜單的餐廳</h2>
+    <select id="restaurant-select" onchange="onRestaurantChange()">
+      <option value="">請選擇餐廳...</option>
+    </select>
+  </div>
+
+  <div class="panel disabled-overlay" id="menu-panel">
+    <h2>③ 上傳菜單照片（AI 辨識，辨識後可手動修改）</h2>
+    <p class="hint">請先選擇上方的餐廳，才能上傳或編輯菜單</p>
+    <input type="file" accept="image/*" id="photo-input" onchange="onPhotoSelected(event)" />
+    <div id="ocr-status"></div>
+
+    <h2 style="margin-top:20px;">④ 菜單明細（可手動新增 / 修改 / 刪除）</h2>
+    <table>
+      <thead>
+        <tr><th>分類</th><th>品項名稱</th><th>價格</th><th></th></tr>
+      </thead>
+      <tbody id="menu-tbody"></tbody>
+    </table>
+    <button class="btn-secondary" onclick="addEmptyRow()" style="margin-top:8px;">＋ 新增一列</button>
+    <div style="margin-top:16px;">
+      <button class="btn-primary" onclick="saveMenu()">💾 儲存菜單</button>
+    </div>
+    <div class="msg" id="save-menu-msg"></div>
+  </div>
+</div>
+
+<script>
+  let ADMIN_PASSWORD = "";
+  let currentRestaurant = "";
+
+  function checkPassword(){
+    const input = document.getElementById("password-input").value;
+    // 先暫存，實際是否正確要等呼叫 API 時才知道（用第一次呼叫來驗證）
+    ADMIN_PASSWORD = input;
+    document.getElementById("password-gate").style.display = "none";
+    document.getElementById("main-content").style.display = "block";
+    loadRestaurants();
+  }
+
+  async function apiGet(path){
+    const res = await fetch(path);
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.detail || "request failed");
+    return data;
+  }
+
+  async function apiPostAdmin(path, body){
+    const res = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Admin-Password": ADMIN_PASSWORD,
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if(res.status === 401){
+      // 密碼錯誤，退回登入畫面
+      document.getElementById("password-gate").style.display = "flex";
+      document.getElementById("main-content").style.display = "none";
+      document.getElementById("password-msg").textContent = "密碼錯誤，請重新輸入";
+      throw new Error("密碼錯誤");
+    }
+    if(!res.ok) throw new Error(data.detail || "request failed");
+    return data;
+  }
+
+  async function loadRestaurants(){
+    try{
+      const data = await apiGet("/api/restaurants");
+      const select = document.getElementById("restaurant-select");
+      select.innerHTML = '<option value="">請選擇餐廳...</option>' +
+        data.restaurants.map(name => `<option value="${name}">${name}</option>`).join("");
+    } catch(e){
+      console.error(e);
+    }
+  }
+
+  async function addRestaurant(){
+    const nameInput = document.getElementById("new-restaurant-name");
+    const name = nameInput.value.trim();
+    const msgEl = document.getElementById("add-restaurant-msg");
+    if(!name){
+      msgEl.textContent = "請輸入餐廳名稱";
+      msgEl.className = "msg error";
+      return;
+    }
+    try{
+      await apiPostAdmin("/api/admin/restaurants", { name });
+      msgEl.textContent = `已新增「${name}」`;
+      msgEl.className = "msg success";
+      nameInput.value = "";
+      await loadRestaurants();
+    } catch(e){
+      msgEl.textContent = e.message;
+      msgEl.className = "msg error";
+    }
+  }
+
+  async function onRestaurantChange(){
+    currentRestaurant = document.getElementById("restaurant-select").value;
+    const menuPanel = document.getElementById("menu-panel");
+    if(!currentRestaurant){
+      menuPanel.classList.add("disabled-overlay");
+      return;
+    }
+    menuPanel.classList.remove("disabled-overlay");
+    try{
+      const data = await apiGet(`/api/menu/${encodeURIComponent(currentRestaurant)}`);
+      renderMenuTable(data.items);
+    } catch(e){
+      renderMenuTable([]);
+    }
+  }
+
+  function renderMenuTable(items){
+    const tbody = document.getElementById("menu-tbody");
+    tbody.innerHTML = "";
+    items.forEach(item => addRow(item.category, item.name, item.price));
+    if(items.length === 0) addEmptyRow();
+  }
+
+  function addRow(category = "", name = "", price = ""){
+    const tbody = document.getElementById("menu-tbody");
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><input type="text" class="cell-category" value="${category}" /></td>
+      <td><input type="text" class="cell-name" value="${name}" /></td>
+      <td><input type="number" class="cell-price" value="${price}" /></td>
+      <td class="col-del"><button class="btn-danger" onclick="this.closest('tr').remove()">✕</button></td>
+    `;
+    tbody.appendChild(tr);
+  }
+
+  function addEmptyRow(){ addRow(); }
+
+  function collectRows(){
+    return Array.from(document.querySelectorAll("#menu-tbody tr")).map(tr => ({
+      category: tr.querySelector(".cell-category").value.trim() || "未分類",
+      name: tr.querySelector(".cell-name").value.trim(),
+      price: parseFloat(tr.querySelector(".cell-price").value) || 0,
+    })).filter(item => item.name);
+  }
+
+  async function saveMenu(){
+    const msgEl = document.getElementById("save-menu-msg");
+    if(!currentRestaurant){
+      msgEl.textContent = "請先選擇餐廳";
+      msgEl.className = "msg error";
+      return;
+    }
+    const items = collectRows();
+    try{
+      const result = await apiPostAdmin(`/api/admin/menu/${encodeURIComponent(currentRestaurant)}`, { items });
+      msgEl.textContent = `已儲存 ${result.count} 個品項`;
+      msgEl.className = "msg success";
+    } catch(e){
+      msgEl.textContent = e.message;
+      msgEl.className = "msg error";
+    }
+  }
+
+  function fileToBase64(file){
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function onPhotoSelected(event){
+    const file = event.target.files[0];
+    if(!file) return;
+    if(!currentRestaurant){
+      alert("請先選擇餐廳");
+      event.target.value = "";
+      return;
+    }
+
+    const statusEl = document.getElementById("ocr-status");
+    statusEl.textContent = "AI 辨識中，請稍候…";
+
+    try{
+      const base64 = await fileToBase64(file);
+      const result = await apiPostAdmin("/api/admin/menu/ocr", { image_base64: base64 });
+      statusEl.textContent = `辨識完成，共找到 ${result.items.length} 個品項，請檢查並修改下方表格後再儲存`;
+      const tbody = document.getElementById("menu-tbody");
+      result.items.forEach(item => addRow(item.category, item.name, item.price));
+    } catch(e){
+      statusEl.textContent = "辨識失敗：" + e.message;
+    } finally {
+      event.target.value = "";
+    }
+  }
+</script>
+
+</body>
+</html>
