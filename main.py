@@ -90,7 +90,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
+# 目前 html 檔案是跟 main.py 放在同一層（沒有另外開 static 資料夾），所以直接指向 BASE_DIR
+STATIC_DIR = BASE_DIR
 
 
 # ------------------------------------------------------------------
