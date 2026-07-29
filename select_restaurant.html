@@ -100,23 +100,7 @@
   }
 
   async function apiGet(path){
-    const res = await fetch(path, {
-      headers: { "X-Telegram-Init-Data": tg?.initData || "" }
-    });
-    const data = await res.json();
-    if(!res.ok) throw new Error(data.detail || "request failed");
-    return data;
-  }
-
-  async function apiPost(path, body){
-    const res = await fetch(path, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Telegram-Init-Data": tg?.initData || "",
-      },
-      body: JSON.stringify(body),
-    });
+    const res = await fetch(path);
     const data = await res.json();
     if(!res.ok) throw new Error(data.detail || "request failed");
     return data;
@@ -129,7 +113,7 @@
     app.innerHTML = `
       <header>
         <h1>選擇餐廳 🏮</h1>
-        <p>上下滾動挑選這一場要點的餐廳</p>
+        <p>上下滾動挑選這一場要點的餐廳（只有發起人選的才會生效）</p>
       </header>
       <div class="wheel-wrap">
         <div class="wheel-highlight"></div>
@@ -175,14 +159,14 @@
     document.getElementById("confirm-btn").addEventListener("click", confirmSelection);
   }
 
-  async function confirmSelection(){
+  function confirmSelection(){
     const restaurant = restaurantNames[selectedIndex];
-    try{
-      await apiPost(`/api/session/${chatId}/restaurant`, { restaurant });
-      showStatus("✅", `已選擇「${restaurant}」，請回到聊天室開始點餐`);
-      setTimeout(() => tg?.close?.(), 1200);
-    } catch(e){
-      showStatus("⚠️", e.message || "選擇失敗，請重試");
+    const payload = { type: "select_restaurant", restaurant };
+
+    if(tg && tg.sendData){
+      tg.sendData(JSON.stringify(payload));
+    } else {
+      alert("選擇的餐廳：" + restaurant);
     }
   }
 
@@ -192,21 +176,16 @@
       return;
     }
 
-    let statusData;
+    let sessionData;
     try{
-      statusData = await apiGet(`/api/session/${chatId}/is-initiator`);
+      sessionData = await apiGet(`/api/session/${chatId}`);
     } catch(e){
-      showStatus("⚠️", e.message || "無法驗證身份，請透過 Telegram 開啟此頁面");
+      showStatus("⚠️", "無法連線到伺服器，請稍後再試。");
       return;
     }
 
-    if(!statusData.active){
+    if(!sessionData.active){
       showStatus("🔒", "目前沒有進行中的點餐。");
-      return;
-    }
-
-    if(!statusData.is_initiator){
-      showStatus("🚫", "只有發起人可以選擇餐廳。");
       return;
     }
 
@@ -220,12 +199,12 @@
 
     restaurantNames = restaurantData.restaurants;
     if(restaurantNames.length === 0){
-      showStatus("🍽️", "目前還沒有任何餐廳，請先到後台新增。");
+      showStatus("🍽️", "目前還沒有任何餐廳，請先用 /新增菜單 建立。");
       return;
     }
 
-    const currentIdx = statusData.restaurant
-      ? Math.max(0, restaurantNames.indexOf(statusData.restaurant))
+    const currentIdx = sessionData.restaurant
+      ? Math.max(0, restaurantNames.indexOf(sessionData.restaurant))
       : 0;
 
     renderWheel(restaurantNames, currentIdx);

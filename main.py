@@ -18,7 +18,7 @@ Telegram 點餐 Bot 後端（文字點餐版）
 2. 發起人用「🏠 選擇餐廳」選好餐廳（滾輪式選單），選定後會把該餐廳的
    菜單照片直接發到聊天室，讓大家對照著點餐
 3. 大家直接在聊天室打字點餐，支援兩種格式：
-   單品項：品項X數量 金額 [備註]        例：牛排X2 300 五分熟
+   單品項：品項X數量 金額 [備註]        例：牛排X2 300 五分熟（金額可放前面或後面）
    多品項：品項1 品項2 ... 金額1+金額2...[備註]   例：地瓜球 紅茶 30+30 少冰
    （金額視為該品項這一行的總金額，不會再乘以數量）
    每人每場只會保留「最新一筆」訂單，重複輸入會覆蓋前一筆
@@ -39,6 +39,11 @@ Telegram 點餐 Bot 後端（文字點餐版）
 - 沒有任何進行中場次時，群組裡的其他任何訊息（包含沒有配對到的照片）一律不理會。
 
 注意：
+- Telegram 規定「web_app 型態的 Inline 按鈕」只能在私訊使用，群組裡用會直接報錯
+  （BUTTON_TYPE_INVALID）。所以「🏠 選擇餐廳」改用群組也能用的 Keyboard Button
+  （鍵盤按鈕）+ sendData() 回傳，由 bot 端驗證是不是發起人；
+  「📋 我的點餐」因為要辨識個人身份，只能在私訊開啟，
+  群組裡看到的是一顆會跳轉到私訊的連結按鈕。
 - 場次記憶、餐廳/菜單資料、使用者個人歷史、新增菜單的暫存狀態，
   目前都存在「記憶體」裡，這支程式一重啟（Render 重新部署）就會清空。
   等之後要正式上線、資料不能不見的話，要幫你接上真正的資料庫。
@@ -67,6 +72,8 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     WebAppInfo,
 )
 from telegram.ext import (
@@ -101,6 +108,8 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR  # html 檔案跟 main.py 放同一層
+
+BOT_USERNAME = ""  # 啟動時會自動抓取，用來組「跳轉到私訊」的連結
 
 
 # ------------------------------------------------------------------
@@ -144,11 +153,17 @@ END_ORDER_CALLBACK = "end_order"
 # ------------------------------------------------------------------
 def parse_order_text(text: str):
     """
-    嘗試把一則文字訊息解析成點餐內容。
+    嘗試把一則文字訊息解析成點餐內容。順序可以打亂——金額可以寫在
+    品項前面或後面都可以辨識，不強制「品項一定要在金額前面」。
 
     支援：
-      單品項：品項[X數量] 金額 [備註]           例：牛排X2 300 五分熟
-      多品項：品項1 品項2 ... 金額1+金額2...[備註]  例：地瓜球 紅茶 30+30 少冰
+      單品項：品項[X數量] 金額 [備註]  或  金額 品項[X數量] [備註]
+        例：牛排X2 300 五分熟  /  300 牛排X2 五分熟
+      多品項：品項1 品項2... 金額1+金額2...[備註]  或  金額1+金額2... 品項1 品項2...[備註]
+        例：地瓜球 紅茶 30+30 少冰  /  30+30 地瓜球 紅茶 少冰
+
+    （備註只能整段連在一起放在「品項」的另一側，不能跟品項文字混在同一側，
+      不然沒辦法分辨哪個字是品項、哪個是備註）
 
     回傳：
       None       -> 完全不像點餐內容（沒有數字），呼叫端應安靜忽略
@@ -170,16 +185,26 @@ def parse_order_text(text: str):
     if price_idx is None:
         return None
 
-    name_tokens = tokens[:price_idx]
+    before = tokens[:price_idx]
     price_tok = tokens[price_idx]
-    note = " ".join(tokens[price_idx + 1:])
+    after = tokens[price_idx + 1:]
+
+    prices = [float(p) if "." in p else int(p) for p in price_tok.split("+")]
+    n = len(prices)
+
+    if len(before) == n:
+        name_tokens, note_tokens = before, after
+    elif len(after) == n:
+        name_tokens, note_tokens = after, before
+    else:
+        return "MISMATCH"
 
     if not name_tokens:
         return "MISMATCH"
 
-    prices = [float(p) if "." in p else int(p) for p in price_tok.split("+")]
+    note = " ".join(note_tokens)
 
-    if len(name_tokens) == 1 and len(prices) == 1:
+    if len(name_tokens) == 1:
         m = re.match(r"^(.+?)[xX](\d+)$", name_tokens[0])
         if m:
             name, qty = m.group(1), int(m.group(2))
@@ -187,11 +212,8 @@ def parse_order_text(text: str):
             name, qty = name_tokens[0], 1
         return ([{"name": name, "qty": qty, "price": prices[0]}], note)
 
-    if len(name_tokens) == len(prices):
-        items = [{"name": n, "qty": 1, "price": p} for n, p in zip(name_tokens, prices)]
-        return (items, note)
-
-    return "MISMATCH"
+    items = [{"name": nm, "qty": 1, "price": p} for nm, p in zip(name_tokens, prices)]
+    return (items, note)
 
 
 def record_order(chat_id: int, user_id: int, user_name: str, items: list[dict], note: str, raw_text: str):
@@ -298,6 +320,17 @@ def require_telegram_user(x_telegram_init_data: str) -> dict:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = update.effective_user
+    is_private = update.effective_chat.type == "private"
+
+    # 深連結：從群組的「📋 我的點餐」按鈕跳轉過來的私訊，直接開啟那場的我的點餐頁面
+    if is_private and context.args and context.args[0].startswith("history_"):
+        target_chat_id = context.args[0][len("history_"):]
+        history_url = f"{BASE_URL}/history?chat_id={target_chat_id}"
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📋 我的點餐", web_app=WebAppInfo(url=history_url))]]
+        )
+        await update.message.reply_text("點下方按鈕查看／修改你在那場點餐的訂單：", reply_markup=markup)
+        return
 
     if chat_id not in active_sessions:
         active_sessions[chat_id] = {
@@ -310,30 +343,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         initiator_name = active_sessions[chat_id]["initiator_name"]
 
+    # 重要：Telegram 規定「web_app 型態的 Inline 按鈕」只能在私訊使用，
+    # 群組裡一定要用 Keyboard Button（鍵盤按鈕），否則會直接報錯
     select_url = f"{BASE_URL}/select-restaurant?chat_id={chat_id}"
-    history_url = f"{BASE_URL}/history?chat_id={chat_id}"
-
-    inline_markup = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🏠 選擇餐廳（限發起人）", web_app=WebAppInfo(url=select_url))],
-            [InlineKeyboardButton("📋 我的點餐", web_app=WebAppInfo(url=history_url))],
-            [InlineKeyboardButton("🛑 結束點餐（限發起人）", callback_data=END_ORDER_CALLBACK)],
-        ]
+    keyboard_markup = ReplyKeyboardMarkup(
+        [[KeyboardButton("🏠 選擇餐廳", web_app=WebAppInfo(url=select_url))]],
+        resize_keyboard=True,
+        is_persistent=True,
     )
 
     await update.message.reply_text(
-        f"🍽️ 點餐開始！（本場發起人：{initiator_name}）\n\n"
-        "發起人請先按「🏠 選擇餐廳」。\n"
-        "選好之後，大家直接在這裡打字點餐即可，格式：\n"
-        "・單品項：品項X數量 金額 備註\n"
-        "　例：牛排X2 300 五分熟\n"
-        "・多品項：品項1 品項2 金額1+金額2 備註\n"
-        "　例：地瓜球 紅茶 30+30 少冰\n"
-        "（同一人重複輸入會覆蓋前一筆訂單）\n\n"
-        "小提醒：之後也可以直接打「/开单」或「/開單」代替 /start，\n"
-        "貼菜單也可以直接打「/新增菜單 餐廳名稱」或「/新增菜单 餐厅名称」代替 /newmenu。",
-        reply_markup=inline_markup,
+        f"🍽️ 點餐開始！發起人：{initiator_name}\n"
+        "請先選擇餐廳，之後直接打「品項 金額 備註」點餐即可（例：牛排X2 300 五分熟）",
+        reply_markup=keyboard_markup,
     )
+
+    # 「我的點餐」需要辨識個人身份，只能在私訊開啟，這裡放一顆連結按鈕跳轉過去
+    history_link = f"https://t.me/{BOT_USERNAME}?start=history_{chat_id}"
+    inline_markup = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📋 我的點餐（將跳轉私訊）", url=history_link)],
+            [InlineKeyboardButton("🛑 結束點餐（限發起人）", callback_data=END_ORDER_CALLBACK)],
+        ]
+    )
+    await update.message.reply_text("查看/修改自己的訂單，或結束這場點餐：", reply_markup=inline_markup)
 
 
 # ------------------------------------------------------------------
@@ -367,7 +400,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if parsed == "MISMATCH":
         await update.message.reply_text(
             "⚠️ 品項數量跟金額數量對不起來，請確認格式：\n"
-            "單品項：品項X數量 金額 備註\n"
+            "單品項：品項X數量 金額 備註（金額可放前面或後面）\n"
             "多品項：品項1 品項2 金額1+金額2 備註"
         )
         return
@@ -419,6 +452,45 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def admin_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"🔑 後台管理連結：\n{BASE_URL}/admin")
+
+
+# ------------------------------------------------------------------
+# 選餐廳 Mini App 傳回資料（透過 Keyboard Button + sendData，身份由這裡驗證）
+# ------------------------------------------------------------------
+async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    try:
+        payload = json.loads(update.effective_message.web_app_data.data)
+    except (json.JSONDecodeError, TypeError):
+        return
+
+    if payload.get("type") != "select_restaurant":
+        return
+
+    session = active_sessions.get(chat_id)
+    if not session:
+        await update.message.reply_text("目前沒有進行中的點餐。")
+        return
+
+    if user.id != session["initiator_id"]:
+        await update.message.reply_text(f"⚠️ 只有發起人「{session['initiator_name']}」可以選擇餐廳。")
+        return
+
+    restaurant = payload.get("restaurant")
+    if restaurant not in restaurants:
+        await update.message.reply_text("⚠️ 餐廳不存在。")
+        return
+
+    session["restaurant"] = restaurant
+    photo_file_id = restaurants[restaurant].get("photo_file_id")
+    if photo_file_id:
+        await context.bot.send_photo(
+            chat_id=chat_id, photo=photo_file_id, caption=f"🍽️ {restaurant} 菜單，請大家對照著點餐"
+        )
+    else:
+        await update.message.reply_text(f"🏠 已選擇「{restaurant}」（這間餐廳目前還沒有菜單照片）")
 
 
 # ------------------------------------------------------------------
@@ -483,8 +555,14 @@ async def lifespan(app: FastAPI):
     )
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
+    telegram_app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
 
     await telegram_app.initialize()
+
+    global BOT_USERNAME
+    me = await telegram_app.bot.get_me()
+    BOT_USERNAME = me.username
+
     await telegram_app.bot.set_webhook(
         url=f"{BASE_URL}/telegram-webhook",
         secret_token=WEBHOOK_SECRET_TOKEN,
@@ -555,55 +633,6 @@ async def api_get_session(chat_id: int):
     if not session:
         return {"active": False}
     return {"active": True, "restaurant": session["restaurant"]}
-
-
-@app.get("/api/session/{chat_id}/is-initiator")
-async def api_is_initiator(chat_id: int, x_telegram_init_data: str = Header(default="")):
-    tg_user = require_telegram_user(x_telegram_init_data)
-    session = active_sessions.get(chat_id)
-    if not session:
-        return {"active": False, "is_initiator": False}
-    return {
-        "active": True,
-        "is_initiator": tg_user["id"] == session["initiator_id"],
-        "restaurant": session["restaurant"],
-    }
-
-
-class SelectRestaurantBody(BaseModel):
-    restaurant: str
-
-
-@app.post("/api/session/{chat_id}/restaurant")
-async def api_select_restaurant(
-    chat_id: int, body: SelectRestaurantBody, x_telegram_init_data: str = Header(default="")
-):
-    tg_user = require_telegram_user(x_telegram_init_data)
-    session = active_sessions.get(chat_id)
-    if not session:
-        raise HTTPException(404, "找不到進行中的點餐場次")
-    if tg_user["id"] != session["initiator_id"]:
-        raise HTTPException(403, "只有發起人可以選擇餐廳")
-    if body.restaurant not in restaurants:
-        raise HTTPException(400, "餐廳不存在")
-
-    session["restaurant"] = body.restaurant
-
-    photo_file_id = restaurants[body.restaurant].get("photo_file_id")
-    if telegram_app:
-        if photo_file_id:
-            await telegram_app.bot.send_photo(
-                chat_id=chat_id,
-                photo=photo_file_id,
-                caption=f"🍽️ {body.restaurant} 菜單，請大家對照著點餐",
-            )
-        else:
-            await telegram_app.bot.send_message(
-                chat_id=chat_id,
-                text=f"🏠 已選擇「{body.restaurant}」（這間餐廳目前還沒有菜單照片）",
-            )
-
-    return {"ok": True}
 
 
 # ---------------- 我的點餐 API ----------------
