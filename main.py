@@ -4,8 +4,7 @@ Telegram 點餐 Bot 後端（文字點餐版）
 這支程式同時做兩件事：
 1. Telegram Bot（webhook 模式，適合 Render 免費方案的休眠機制）
 2. 一個小型網站伺服器（FastAPI），提供：
-   - /select-restaurant 選餐廳頁面（Mini App，限發起人）
-   - /history           「我的點餐」頁面（Mini App，本場訂單修改/刪除 + 常用紀錄快速重送）
+   - /history           「我的點餐」頁面（Mini App，本場訂單修改/刪除 + 常用紀錄快速重送，只能在私訊開啟）
    - /admin             後台管理頁面（手動新增餐廳、編輯菜單）
    - /telegram-webhook  Telegram 推送新訊息的接收端點
    - /health            保活用的健康檢查端點
@@ -14,9 +13,9 @@ Telegram 點餐 Bot 後端（文字點餐版）
 功能總覽：
 1. /start（或「/开单」「/開單」）
    - 該聊天室第一個發起的人 = 本場「發起人」
-   - 顯示使用說明 + 三顆 Inline 按鈕：選擇餐廳／我的點餐／結束點餐
-2. 發起人用「🏠 選擇餐廳」選好餐廳（滾輪式選單），選定後會把該餐廳的
-   菜單照片直接發到聊天室，讓大家對照著點餐
+   - 顯示一排餐廳按鈕（一般 Inline 按鈕，不是 Mini App）+「📋 我的點餐」「🛑 結束點餐」
+2. 發起人點選其中一顆餐廳按鈕，選定後會把該餐廳的菜單照片直接發到聊天室，
+   讓大家對照著點餐
 3. 大家直接在聊天室打字點餐，支援兩種格式：
    單品項：品項X數量 金額 [備註]        例：牛排X2 300 五分熟（金額可放前面或後面）
    多品項：品項1 品項2 ... 金額1+金額2...[備註]   例：地瓜球 紅茶 30+30 少冰
@@ -39,11 +38,12 @@ Telegram 點餐 Bot 後端（文字點餐版）
 - 沒有任何進行中場次時，群組裡的其他任何訊息（包含沒有配對到的照片）一律不理會。
 
 注意：
-- Telegram 規定「web_app 型態的 Inline 按鈕」只能在私訊使用，群組裡用會直接報錯
-  （BUTTON_TYPE_INVALID）。所以「🏠 選擇餐廳」改用群組也能用的 Keyboard Button
-  （鍵盤按鈕）+ sendData() 回傳，由 bot 端驗證是不是發起人；
-  「📋 我的點餐」因為要辨識個人身份，只能在私訊開啟，
-  群組裡看到的是一顆會跳轉到私訊的連結按鈕。
+- Telegram 規定「web_app 型態的按鈕」不管是 Inline 按鈕還是 Keyboard 按鈕，
+  一律只能在私訊使用，群組裡用就會直接報錯（BadRequest）。
+  所以「選餐廳」改成一般的 Inline 按鈕清單（callback_data 類型，沒有這個限制），
+  不用 Mini App 也能限定只有發起人選擇有效；
+  「📋 我的點餐」因為需要辨識個人身份，只能在私訊開啟，
+  群組裡看到的是一顆會跳轉到私訊的一般連結按鈕（url 類型，同樣不受此限制）。
 - 場次記憶、餐廳/菜單資料、使用者個人歷史、新增菜單的暫存狀態，
   目前都存在「記憶體」裡，這支程式一重啟（Render 重新部署）就會清空。
   等之後要正式上線、資料不能不見的話，要幫你接上真正的資料庫。
@@ -72,8 +72,6 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
     WebAppInfo,
 )
 from telegram.ext import (
@@ -146,6 +144,7 @@ active_sessions: dict[int, dict] = {}
 user_history: dict[int, list[dict]] = {}
 
 END_ORDER_CALLBACK = "end_order"
+SELECT_RESTAURANT_PREFIX = "select_restaurant:"
 
 
 # ------------------------------------------------------------------
@@ -343,19 +342,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         initiator_name = active_sessions[chat_id]["initiator_name"]
 
-    # 重要：Telegram 規定「web_app 型態的 Inline 按鈕」只能在私訊使用，
-    # 群組裡一定要用 Keyboard Button（鍵盤按鈕），否則會直接報錯
-    select_url = f"{BASE_URL}/select-restaurant?chat_id={chat_id}"
-    keyboard_markup = ReplyKeyboardMarkup(
-        [[KeyboardButton("🏠 選擇餐廳", web_app=WebAppInfo(url=select_url))]],
-        resize_keyboard=True,
-        is_persistent=True,
-    )
+    # 重要：Telegram 規定「web_app 型態的按鈕」不管是 Inline 還是 Keyboard，
+    # 一律只能在私訊使用，群組裡用了會直接報錯。所以選餐廳改成一般的按鈕清單
+    # （callback_data 類型，沒有這個限制），不用 Mini App 也能做到限定發起人選擇。
+    restaurant_names = list(restaurants.keys())
+    restaurant_buttons = [
+        [InlineKeyboardButton(name, callback_data=f"{SELECT_RESTAURANT_PREFIX}{name}")]
+        for name in restaurant_names
+    ]
 
     await update.message.reply_text(
         f"🍽️ 點餐開始！發起人：{initiator_name}\n"
-        "請先選擇餐廳，之後直接打「品項 金額 備註」點餐即可（例：牛排X2 300 五分熟）",
-        reply_markup=keyboard_markup,
+        "發起人請從下方選一間餐廳，選好後大家直接打「品項 金額 備註」點餐即可（例：牛排X2 300 五分熟）",
+        reply_markup=InlineKeyboardMarkup(restaurant_buttons) if restaurant_buttons else None,
     )
 
     # 「我的點餐」需要辨識個人身份，只能在私訊開啟，這裡放一顆連結按鈕跳轉過去
@@ -455,42 +454,40 @@ async def admin_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ------------------------------------------------------------------
-# 選餐廳 Mini App 傳回資料（透過 Keyboard Button + sendData，身份由這裡驗證）
+# 選餐廳按鈕（一般 Inline 按鈕 + callback_data，群組完全合法，沒有 web_app 限制）
 # ------------------------------------------------------------------
-async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-
-    try:
-        payload = json.loads(update.effective_message.web_app_data.data)
-    except (json.JSONDecodeError, TypeError):
-        return
-
-    if payload.get("type") != "select_restaurant":
-        return
+async def select_restaurant_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat_id = query.message.chat.id
+    user = query.from_user
 
     session = active_sessions.get(chat_id)
     if not session:
-        await update.message.reply_text("目前沒有進行中的點餐。")
+        await query.answer("目前沒有進行中的點餐。", show_alert=True)
         return
 
     if user.id != session["initiator_id"]:
-        await update.message.reply_text(f"⚠️ 只有發起人「{session['initiator_name']}」可以選擇餐廳。")
+        await query.answer("只有發起人可以選擇餐廳", show_alert=True)
         return
 
-    restaurant = payload.get("restaurant")
+    restaurant = query.data[len(SELECT_RESTAURANT_PREFIX):]
     if restaurant not in restaurants:
-        await update.message.reply_text("⚠️ 餐廳不存在。")
+        await query.answer("餐廳不存在。", show_alert=True)
         return
 
+    await query.answer()
     session["restaurant"] = restaurant
+    await query.edit_message_reply_markup(reply_markup=None)
+
     photo_file_id = restaurants[restaurant].get("photo_file_id")
     if photo_file_id:
         await context.bot.send_photo(
             chat_id=chat_id, photo=photo_file_id, caption=f"🍽️ {restaurant} 菜單，請大家對照著點餐"
         )
     else:
-        await update.message.reply_text(f"🏠 已選擇「{restaurant}」（這間餐廳目前還沒有菜單照片）")
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"🏠 已選擇「{restaurant}」（這間餐廳目前還沒有菜單照片）"
+        )
 
 
 # ------------------------------------------------------------------
@@ -553,9 +550,11 @@ async def lifespan(app: FastAPI):
     telegram_app.add_handler(
         CallbackQueryHandler(end_button_callback, pattern=f"^{END_ORDER_CALLBACK}$")
     )
+    telegram_app.add_handler(
+        CallbackQueryHandler(select_restaurant_callback, pattern=f"^{SELECT_RESTAURANT_PREFIX}")
+    )
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
-    telegram_app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
 
     await telegram_app.initialize()
 
@@ -597,11 +596,6 @@ async def health():
 
 
 # ---------------- 頁面 ----------------
-
-@app.get("/select-restaurant")
-async def select_restaurant_page():
-    return FileResponse(STATIC_DIR / "select_restaurant.html")
-
 
 @app.get("/history")
 async def history_page():
