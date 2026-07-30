@@ -1,7 +1,11 @@
-# Telegram 點餐 Bot — 專案說明文件
+# Telegram 點餐 Bot — 專案說明文件（簡化版）
 
 這份文件彙整了目前這個專案所有需要記住的資訊：金鑰、帳密、部署設定、操作方式。
 請自行保管好這份文件，不要外流（裡面有實際可用的密鑰）。
+
+> **這次做了大幅簡化**：拿掉了整個「餐廳管理」「菜單照片」「後台網頁」功能。
+> 現在的邏輯是——開單之後，大家自己在聊天室講要吃什麼、自己貼照片參考，
+> bot 完全不管這件事，只負責把「品項 金額 備註」格式的訊息記錄下來，結單時彙整。
 
 ---
 
@@ -10,10 +14,11 @@
 | 項目 | 內容 |
 |---|---|
 | Render 服務網址 | https://ggman.onrender.com |
-| 後台管理網址 | https://ggman.onrender.com/admin |
 | 保活健康檢查端點 | https://ggman.onrender.com/health |
 | GitHub Repo | `168cod-del/ggman`（branch: `main`） |
 | 部署平台 | Render（Free 方案） |
+
+> `/admin` 後台網頁已經拿掉了，現在整個服務只剩 `/telegram-webhook` 和 `/health` 兩個網址。
 
 ---
 
@@ -23,17 +28,16 @@
 |---|---|---|
 | Telegram Bot Token | `8396988188:AAHnH2wRRu0IpnMB7gicvqwXc6bB8f-axso` | bot 登入憑證，寫在 `main.py` 的 `BOT_TOKEN` |
 | Webhook 密鑰 | `3d5503dd54239bc4e701d1645cb9e456` | 驗證 webhook 推送真的來自 Telegram，寫在 `WEBHOOK_SECRET_TOKEN` |
-| 後台管理密碼 | `a123456` | 登入 `/admin` 網頁用，寫在 `ADMIN_PASSWORD` |
-| Google AI Studio (Gemini) API Key | `AQ.Ab8RN6L1AAOo15rPaF0lnlZfQph6-3zdFZ-MUJID9ATO1EyYnQ` | 原本要做「照片辨識菜單」，**這個功能後來放棄了，目前程式碼裡完全沒有用到這組 key** |
-| DATABASE_URL | Neon 給的 PostgreSQL 連線字串 | **不要寫在 `main.py` 裡**，設定成 Render 的 Environment Variable，程式用 `os.environ.get("DATABASE_URL")` 讀取。實際值請自行到 Neon 後台查看，這份文件故意不記錄實際字串，降低外流風險 |
+| DATABASE_URL | Neon 給的 PostgreSQL 連線字串 | 設定成 Render 的 Environment Variable，讓場次資料重啟不會消失。實際值請自行到 Neon 後台查看 |
 
 ### ⚠️ 安全性提醒
-- Bot Token 跟 Gemini API Key 都曾經直接貼在對話紀錄裡，等於已經曝光過。
-  建議找時間：
-  1. 去 [@BotFather](https://t.me/BotFather) 用 `/revoke` 重新產生一組新的 Bot Token
-  2. 去 Google AI Studio 重新產生一組新的 API Key（如果之後還要用）
-  3. 改用 Render 的 **Environment Variables** 存放這些值，不要寫死在 `main.py` 裡
-- 目前是「堪用但不夠安全」的狀態，正式對外大量使用前建議處理掉這幾點。
+Bot Token 已經在對話紀錄裡曝光過，建議找時間去 [@BotFather](https://t.me/BotFather)
+用 `/revoke` 重新產生一組新的，並改用 Render 的 Environment Variables 存放，
+不要寫死在 `main.py` 裡。
+
+> 之前提過的 Google AI Studio (Gemini) API Key 已經完全用不到了（照片辨識菜單的功能
+> 從頭到尾都放棄了），可以不用再管它。
+> 後台管理密碼（原本是 `a123456`）也隨著後台網頁一起拿掉了，不用再記。
 
 ---
 
@@ -44,12 +48,12 @@
 | Build Command | `pip install -r requirements.txt` |
 | Start Command | `uvicorn main:app --host 0.0.0.0 --port $PORT` |
 | Runtime | Python 3 |
-| Environment Variables | `PYTHON_VERSION` = `3.11.9`（避免新版 Python 編譯 pydantic 失敗）<br>`DATABASE_URL` = Neon 的連線字串（讓資料庫持久化生效必須設定這個） |
+| Environment Variables | `PYTHON_VERSION` = `3.11.9`（避免新版 Python 編譯套件失敗）<br>`DATABASE_URL` = Neon 的連線字串（要讓場次資料持久化才需要設定） |
 | Instance Type | Free |
 
 **Free 方案的限制**：閒置約 15 分鐘會自動休眠，有新訊息時會透過 webhook 自動喚醒，
 但第一則訊息可能延遲 30–60 秒。建議用 [UptimeRobot](https://uptimerobot.com)
-（免費）每 5–10 分鐘打一次 `/health` 端點，可以大幅降低喚醒延遲。
+（免費）每 5 分鐘打一次 `https://ggman.onrender.com/health`，降低喚醒延遲。
 
 ---
 
@@ -58,24 +62,20 @@
 | 設定 | 狀態 |
 |---|---|
 | Group Privacy | **Disabled**（必須關閉，否則群組裡的點餐文字訊息 bot 收不到） |
-| Menu Button | 之前設定過，但現在的架構已經不需要它了，網址也是舊的（GitHub Pages 時期）。
-可以去 BotFather → `/mybots` → 選 bot → Bot Settings → Menu Button → **Remove Menu Button** 清掉，不影響現在的功能 |
+| Menu Button | 之前設定過但已經完全用不到了，可以去 BotFather 移除掉 |
 
 ### 指令選單（「/」圖示點開的那個清單）
 
-Telegram 規定指令「名稱」只能是英文字母數字，不能是中文，所以清單上的指令一定是英文，
-但後面的說明文字可以是中文。去 BotFather 打 `/setcommands`，選這個 bot，貼上：
+去 BotFather 打 `/setcommands`，選這個 bot，貼上：
 
 ```
 start - 開單（發起點餐，第一個打的人是發起人）
 delorder - 刪除我的訂單
 help - 使用說明
 end - 結束點餐（限發起人）
-newmenu - 新增餐廳菜單（貼餐廳名稱後上傳照片）
-admin - 後台管理連結
 ```
 
-貼上後選單就會顯示這 6 個指令跟中文說明。
+（之前清單裡的 `/newmenu`、`/admin` 已經拿掉，因為對應的功能都刪除了）
 
 ---
 
@@ -84,13 +84,11 @@ admin - 後台管理連結
 ```
 your-repo/
 ├── main.py              # 後端主程式（Bot + FastAPI 網站）
-├── requirements.txt      # Python 套件清單
-└── static/
-    └── admin.html        # 後台管理網頁
+└── requirements.txt      # Python 套件清單
 ```
 
-> 之前開發過程中出現過的 `select_restaurant.html`、`history.html`、舊版 `index.html`
-> 現在都已經沒有用到，repo 裡如果還留著可以直接刪除。
+> `static/` 資料夾（`admin.html`、`select_restaurant.html`、`history.html` 等）
+> 已經完全沒有用了，repo 裡如果還留著可以整個資料夾刪除。
 
 ---
 
@@ -98,11 +96,9 @@ your-repo/
 
 ### 開始點餐
 打 `/开单`、`/開單` 或 `/start` 皆可。該聊天室裡**第一個**打這個指令的人，
-會被記錄為本場「發起人」。
-
-### 選餐廳
-發起人從跳出來的餐廳按鈕清單裡點選一個。選定後會把該餐廳的菜單照片
-（如果有上傳過）直接發到聊天室，讓大家對照著點餐。
+會被記錄為本場「發起人」。開單後不需要選餐廳、不需要等任何人上傳菜單——
+想吃什麼、要參考哪間店，大家自己在聊天室講、自己貼照片就好，bot 不會處理照片，
+純粹讓大家自己看。
 
 ### 點餐（直接在聊天室打字，金額為必填）
 
@@ -128,7 +124,7 @@ your-repo/
 ### 結束點餐（限發起人）
 打 `/结单`、`/結單`、`/end`，或直接按「🛑 結束點餐」按鈕皆可。
 結束後會顯示：
-- 每人明細（誰點了什麼、多少錢）
+- 每人明細（誰點了什麼、備註、多少錢）
 - 品項彙總（同名品項自動加總數量）
 - 合計金額
 
@@ -136,41 +132,20 @@ your-repo/
 
 ---
 
-## 7. 新增餐廳（兩種方式都可以）
+## 7. 重要限制與已知行為
 
-### 方式一：在 Telegram 聊天室
-1. 打 `/新增菜單 餐廳名稱`（或 `/新增菜单`、`/newmenu`）
-2. bot 會請你接著上傳一張菜單照片
-3. **同一個人**傳一張照片過去，收到「已新增」的回覆就完成了
-
-### 方式二：後台網頁
-1. 開啟 https://ggman.onrender.com/admin，輸入密碼 `a123456`
-2. 在「新增餐廳」欄位輸入名稱、按新增
-3. 在清單裡按該餐廳的「📷 上傳照片」，選擇圖片（電腦、手機都可以直接用原生的選檔案/相簿介面）
-
-後台也可以查看每間餐廳有沒有照片、刪除餐廳。
+- **場次資料**：有設定 `DATABASE_URL` 的話會同步存進 Neon 資料庫，Render 重新部署
+  或重啟不會清空，啟動時會自動載回記憶體。沒設定的話就是純記憶體模式，重啟會清空。
+- Telegram 規定「web_app 型態的按鈕」只能在私訊使用，群組裡用會直接報錯——
+  這支程式現在完全沒有用到 Mini App / WebApp，「結束點餐」用的是一般的 Inline
+  按鈕（callback_data），不受這個限制影響。
+- 點餐用的文字辨識只在「該聊天室有進行中場次」時才會運作，其餘時間 bot 對群組裡
+  的任何對話（包含照片）都不會有反應。
 
 ---
 
-## 8. 重要限制與已知行為
+## 8. 之後可能的優化方向（尚未實作）
 
-- **資料庫已接上 Neon（PostgreSQL）**：餐廳清單、菜單照片、進行中的點餐場次，
-  現在都會同步寫進資料庫，Render 重新部署或重啟**不會再清空**，啟動時會自動
-  從資料庫載回記憶體。前提是 Render 的 **Environment Variables** 裡有設定
-  `DATABASE_URL`（Neon 給的連線字串，含密碼）。如果沒設定這個環境變數，
-  程式會自動退回「純記憶體」模式運作（等於還沒接資料庫前的行為），
-  不會報錯，但重啟一樣會清空。
-- Telegram 規定「web_app 型態的按鈕」只能在私訊使用，群組裡用會直接報錯，
-  所以選餐廳、結束點餐都用一般的 Inline 按鈕（callback_data），不是 Mini App。
-- 點餐用的文字辨識只在「該聊天室有進行中場次、且已選好餐廳」時才會運作，
-  其餘時間 bot 對群組裡的任何對話都不會有反應。
-- webhook 模式搭配 Render 免費方案的休眠機制設計時特別注意：
-  服務關閉時**不會**取消 webhook 設定（避免休眠後 bot 永久失聯，這是修過的一個重要 bug）。
-
----
-
-## 9. 之後可能的優化方向（尚未實作）
-
-- 輪替目前已曝光的 Bot Token 與 Gemini API Key，改用環境變數管理
-- 如果之後想加回「查看菜單品項明細」「點餐歷史」等功能，需要重新設計（先前的
-  Mini App 方案在群組情境下有 Telegram 平台限制，需要用不同的技術路線）
+- 輪替目前已曝光的 Bot Token，改用環境變數管理
+- 如果之後又想加回「照片辨識菜單」「餐廳管理」之類的功能，這份文件保留的歷史脈絡
+  可以參考，但目前判斷這類功能實際使用率低、維護成本高，暫不建議恢復
