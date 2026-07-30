@@ -386,13 +386,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = update.effective_user
 
-    if chat_id not in active_sessions:
-        active_sessions[chat_id] = {
-            "initiator_id": user.id,
-            "initiator_name": user.full_name,
-            "orders_by_user": {},
-        }
-        await db_upsert_session(chat_id, active_sessions[chat_id])
+    if chat_id in active_sessions:
+        await update.message.reply_text("已經有人開單囉")
+        return
+
+    active_sessions[chat_id] = {
+        "initiator_id": user.id,
+        "initiator_name": user.full_name,
+        "orders_by_user": {},
+    }
+    await db_upsert_session(chat_id, active_sessions[chat_id])
 
     await update.message.reply_text(
         "品項 金額 備註（例：牛排X2 300 五分熟）\n"
