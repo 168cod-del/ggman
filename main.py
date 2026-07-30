@@ -20,7 +20,7 @@ Telegram 點餐 Bot 後端（簡化版：純文字點餐，沒有餐廳/菜單�
                      品項1品項1金額品項2金額...（無分隔符號也可以）
    多品項＋共用總金額（金額需放最後）：品項1 品項2 總金額
                      品項1 品項2＝總金額
-   （品項之間可以用 + / . 或空白分隔）
+   （品項之間可以用 + / . 、 或空白分隔）
    每人每場只會保留「最新一筆」訂單，重複輸入會覆蓋前一筆
 3. 想刪除自己這場的訂單，直接打「/删」「/删单」「/删除」（或繁體「/刪」「/刪單」「/刪除」）
    或正式指令 /delorder 皆可，不用二次確認，成功會回覆「刪單成功」
@@ -190,7 +190,7 @@ async def db_delete_session(chat_id: int):
 # 文字點餐解析
 # ------------------------------------------------------------------
 # 品項清單常見的分隔符號：加號、斜線、句點、空白（空白已經由 text.split() 處理）
-_ITEM_SEP_RE = re.compile(r"[+/.]")
+_ITEM_SEP_RE = re.compile(r"[+/.、]")
 
 
 def _expand_plus(tokens: list[str]) -> list[str]:
@@ -248,7 +248,7 @@ def parse_order_text(text: str):
             left, right = left.strip(), right.strip()
             if not left or not re.fullmatch(r"\d+(\.\d+)?", right):
                 return "MISMATCH"
-            names = [n for n in re.split(r"[+/.\s]+", left) if n]
+            names = [n for n in re.split(r"[+/.、\s]+", left) if n]
             if not names:
                 return "MISMATCH"
             total = float(right) if "." in right else int(right)
@@ -297,15 +297,17 @@ def parse_order_text(text: str):
     if len(expanded_before) == n:
         return (_build_items(expanded_before, prices), " ".join(after), None)
 
+    # 前面明顯是多品項清單（2 個以上）、金額只有 1 個時，
+    # 優先當成「這幾樣共用一個總金額」，後面（如果有）當備註。
+    # 一定要放在「後面是否符合數量」判斷之前，
+    # 不然像「牛排、雞排 300 加辣」會被誤判成「加辣」才是品項、
+    # 「牛排、雞排」變成備註。
+    if n == 1 and len(expanded_before) >= 2:
+        items = [{"name": t, "qty": 1, "price": 0} for t in expanded_before]
+        return (items, " ".join(after), prices[0])
+
     if len(expanded_after) == n:
         return (_build_items(expanded_after, prices), " ".join(before), None)
-
-    # 只有在金額是整句最後一個詞、且前面有品項時，才當作「多品項共用一個總金額」
-    if n == 1 and not after:
-        combined = [t for t in expanded_before if t]
-        if combined:
-            items = [{"name": t, "qty": 1, "price": 0} for t in combined]
-            return (items, "", prices[0])
 
     return "MISMATCH"
 
@@ -412,9 +414,14 @@ async def delete_my_order(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 HELP_TEXT = (
     "開單：/start 或 /开单／開單\n"
-    "點餐：直接打「品項 金額 備註」，例如 牛排X2 300 五分熟\n"
     "刪單：/delorder 或 /删／删单／删除\n"
-    "結單：/end 或 /结单／結單（限發起人）"
+    "結單：/end 或 /结单／結單（限發起人）\n\n"
+    "點餐格式（金額必填，品項之間可用 + / . 、 或空白分隔）：\n"
+    "單品項：牛排X2 300 五分熟\n"
+    "多品項各自金額：地瓜球 紅茶 30+30 少冰\n"
+    "多品項免分隔：牛肉麵30豬頭皮30酸菜30\n"
+    "多品項共用總金額：牛肉麵 豬頭皮 酸菜 90\n"
+    "　　　　　　　　牛肉麵 豬頭皮 酸菜＝90"
 )
 
 
