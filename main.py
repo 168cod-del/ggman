@@ -354,17 +354,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 重要：Telegram 規定「web_app 型態的按鈕」不管是 Inline 還是 Keyboard，
     # 一律只能在私訊使用，群組裡用了會直接報錯。所以選餐廳改成一般的按鈕清單
     # （callback_data 類型，沒有這個限制），不用 Mini App 也能做到限定發起人選擇。
+    #
+    # 餐廳按鈕跟「結束點餐」按鈕故意分成兩則獨立訊息：
+    # 選好餐廳後只會清掉「餐廳按鈕」那則訊息的按鈕，
+    # 「結束點餐」維持在另一則訊息上，才能一直常駐、隨時可以按。
     restaurant_names = list(restaurants.keys())
-    buttons = [
+    restaurant_buttons = [
         [InlineKeyboardButton(name, callback_data=f"{SELECT_RESTAURANT_PREFIX}{name}")]
         for name in restaurant_names
     ]
-    buttons.append([InlineKeyboardButton("🛑 結束點餐（限發起人）", callback_data=END_ORDER_CALLBACK)])
 
     await update.message.reply_text(
         "品項 金額 備註（例：牛排X2 300 五分熟）\n"
         "/删 /删单 /删除 可刪除自己的訂單",
-        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_markup=InlineKeyboardMarkup(restaurant_buttons) if restaurant_buttons else None,
+    )
+
+    await update.message.reply_text(
+        "🛑 結束點餐（限發起人）",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🛑 結束點餐（限發起人）", callback_data=END_ORDER_CALLBACK)]]
+        ),
     )
 
 
