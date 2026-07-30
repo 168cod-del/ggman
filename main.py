@@ -58,11 +58,14 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import asyncpg
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -96,6 +99,11 @@ WEBHOOK_SECRET_TOKEN = "3d5503dd54239bc4e701d1645cb9e456"
 
 # 後台管理密碼，建議自己改掉
 ADMIN_PASSWORD = "a123456"
+
+# 資料庫連線字串——不要寫在這裡！去 Render 的 Environment 頁籤新增一個環境變數
+# 名稱叫 DATABASE_URL，值貼上 Neon 給你的連線字串（含密碼）。
+# 這裡只是讀取那個環境變數，沒有設定的話會是 None，程式會自動退回記憶體模式運作。
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -142,6 +150,134 @@ active_sessions: dict[int, dict] = {}
 
 END_ORDER_CALLBACK = "end_order"
 SELECT_RESTAURANT_PREFIX = "select_restaurant:"
+
+
+# ------------------------------------------------------------------
+# 資料庫（可選）：有設定 DATABASE_URL 才會啟用，讓資料在重啟後不會消失
+# 沒設定的話下面每個函式都會安靜跳過，跟之前一樣純記憶體運作
+# ------------------------------------------------------------------
+db_pool: asyncpg.Pool | None = None
+
+
+async def db_init():
+    global db_pool
+    if not DATABASE_URL:
+        logger.warning("沒有設定 DATABASE_URL，資料只存在記憶體裡，重啟會清空。")
+        return
+
+    db_pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5)
+    await db_pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS restaurants (
+            name TEXT PRIMARY KEY,
+            photo_file_id TEXT,
+            photo_bytes_base64 TEXT
+        )
+        """
+    )
+    await db_pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            chat_id BIGINT PRIMARY KEY,
+            initiator_id BIGINT NOT NULL,
+            initiator_name TEXT NOT NULL,
+            restaurant TEXT,
+            orders_by_user JSONB NOT NULL DEFAULT '{}'::jsonb
+        )
+        """
+    )
+
+    rows = await db_pool.fetch("SELECT name, photo_file_id, photo_bytes_base64 FROM restaurants")
+    if rows:
+        restaurants.clear()
+        for row in rows:
+            restaurants[row["name"]] = {
+                "photo_file_id": row["photo_file_id"],
+                "photo_bytes_base64": row["photo_bytes_base64"],
+            }
+    else:
+        # 資料庫是空的（第一次接上），把預設的測試餐廳寫進去，之後就以資料庫為準
+        for name, data in restaurants.items():
+            await db_upsert_restaurant(name, data)
+
+    session_rows = await db_pool.fetch(
+        "SELECT chat_id, initiator_id, initiator_name, restaurant, orders_by_user FROM sessions"
+    )
+    for row in session_rows:
+        raw_orders = row["orders_by_user"]
+        orders_by_user = json.loads(raw_orders) if isinstance(raw_orders, str) else (raw_orders or {})
+        active_sessions[row["chat_id"]] = {
+            "initiator_id": row["initiator_id"],
+            "initiator_name": row["initiator_name"],
+            "restaurant": row["restaurant"],
+            "orders_by_user": {int(k): v for k, v in orders_by_user.items()},
+        }
+
+    logger.info(
+        "資料庫連線成功，已載入 %d 間餐廳、%d 個進行中場次",
+        len(restaurants), len(active_sessions),
+    )
+
+
+async def db_close():
+    if db_pool:
+        await db_pool.close()
+
+
+async def db_upsert_restaurant(name: str, data: dict):
+    if not db_pool:
+        return
+    try:
+        await db_pool.execute(
+            """
+            INSERT INTO restaurants (name, photo_file_id, photo_bytes_base64)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (name) DO UPDATE
+            SET photo_file_id = $2, photo_bytes_base64 = $3
+            """,
+            name, data.get("photo_file_id"), data.get("photo_bytes_base64"),
+        )
+    except Exception:
+        logger.exception("寫入餐廳資料到資料庫失敗")
+
+
+async def db_delete_restaurant(name: str):
+    if not db_pool:
+        return
+    try:
+        await db_pool.execute("DELETE FROM restaurants WHERE name = $1", name)
+    except Exception:
+        logger.exception("從資料庫刪除餐廳失敗")
+
+
+async def db_upsert_session(chat_id: int, session: dict):
+    if not db_pool:
+        return
+    try:
+        await db_pool.execute(
+            """
+            INSERT INTO sessions (chat_id, initiator_id, initiator_name, restaurant, orders_by_user)
+            VALUES ($1, $2, $3, $4, $5::jsonb)
+            ON CONFLICT (chat_id) DO UPDATE
+            SET initiator_id = $2, initiator_name = $3, restaurant = $4, orders_by_user = $5::jsonb
+            """,
+            chat_id,
+            session["initiator_id"],
+            session["initiator_name"],
+            session["restaurant"],
+            json.dumps(session["orders_by_user"]),
+        )
+    except Exception:
+        logger.exception("寫入場次資料到資料庫失敗")
+
+
+async def db_delete_session(chat_id: int):
+    if not db_pool:
+        return
+    try:
+        await db_pool.execute("DELETE FROM sessions WHERE chat_id = $1", chat_id)
+    except Exception:
+        logger.exception("從資料庫刪除場次失敗")
 
 
 # ------------------------------------------------------------------
@@ -268,7 +404,7 @@ def parse_order_text(text: str):
     return "MISMATCH"
 
 
-def record_order(
+async def record_order(
     chat_id: int,
     user_id: int,
     user_name: str,
@@ -293,6 +429,7 @@ def record_order(
         "raw_text": raw_text,
     }
     session["orders_by_user"][user_id] = order_record
+    await db_upsert_session(chat_id, session)
 
     return build_order_line(user_name, order_record)
 
@@ -350,6 +487,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "restaurant": None,
             "orders_by_user": {},
         }
+        await db_upsert_session(chat_id, active_sessions[chat_id])
 
     # 重要：Telegram 規定「web_app 型態的按鈕」不管是 Inline 還是 Keyboard，
     # 一律只能在私訊使用，群組裡用了會直接報錯。所以選餐廳改成一般的按鈕清單
@@ -383,6 +521,7 @@ async def delete_my_order(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user = update.effective_user
     session = active_sessions.get(chat_id)
     if session and session["orders_by_user"].pop(user.id, None) is not None:
+        await db_upsert_session(chat_id, session)
         await update.message.reply_text("刪單成功")
 
 
@@ -441,7 +580,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     items, note, total_override = parsed
-    summary = record_order(chat_id, user.id, user.full_name, items, note, text, total_override)
+    summary = await record_order(chat_id, user.id, user.full_name, items, note, text, total_override)
     if summary:
         await update.message.reply_text(summary)
 
@@ -480,6 +619,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     photo = update.effective_message.photo[-1]  # 取最大尺寸
     restaurants[restaurant_name] = {"photo_file_id": photo.file_id, "photo_bytes_base64": None}
+    await db_upsert_restaurant(restaurant_name, restaurants[restaurant_name])
     del pending_menu_uploads[user_id]
 
     await update.message.reply_text(f"✅ 已新增「{restaurant_name}」，菜單照片已儲存。")
@@ -539,6 +679,7 @@ async def select_restaurant_callback(update: Update, context: ContextTypes.DEFAU
 
     await query.answer()
     session["restaurant"] = restaurant
+    await db_upsert_session(chat_id, session)
     await query.edit_message_reply_markup(reply_markup=None)
 
     await send_restaurant_menu(context.bot, chat_id, restaurant)
@@ -562,6 +703,7 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     final_text = build_final_summary(session)
     del active_sessions[chat_id]
+    await db_delete_session(chat_id)
     await update.message.reply_text(final_text)
 
 
@@ -582,6 +724,7 @@ async def end_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     final_text = build_final_summary(session)
     del active_sessions[chat_id]
+    await db_delete_session(chat_id)
 
     await query.edit_message_reply_markup(reply_markup=None)
     await context.bot.send_message(chat_id=chat_id, text=final_text)
@@ -602,6 +745,9 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global telegram_app
+
+    await db_init()
+
     telegram_app = Application.builder().token(BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("end", end_session))
@@ -638,6 +784,7 @@ async def lifespan(app: FastAPI):
     # 只能手動重新部署才能恢復——這正是之前反覆斷線的根本原因。
     await telegram_app.stop()
     await telegram_app.shutdown()
+    await db_close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -729,6 +876,7 @@ async def api_add_restaurant(body: NewRestaurantBody, x_admin_password: str = He
     if name in restaurants:
         raise HTTPException(400, "這間餐廳已經存在")
     restaurants[name] = {"photo_file_id": None, "photo_bytes_base64": None}
+    await db_upsert_restaurant(name, restaurants[name])
     return {"ok": True}
 
 
@@ -766,6 +914,7 @@ async def api_upload_restaurant_photo(
 
     restaurants[restaurant]["photo_bytes_base64"] = image_data
     restaurants[restaurant]["photo_file_id"] = None  # 換成新照片後，舊的 file_id 版本失效
+    await db_upsert_restaurant(restaurant, restaurants[restaurant])
     return {"ok": True}
 
 
@@ -779,6 +928,7 @@ async def api_delete_restaurant(body: DeleteRestaurantBody, x_admin_password: st
     if body.name not in restaurants:
         raise HTTPException(404, "餐廳不存在")
     del restaurants[body.name]
+    await db_delete_restaurant(body.name)
     return {"ok": True}
 
 

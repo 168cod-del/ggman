@@ -25,6 +25,7 @@
 | Webhook 密鑰 | `3d5503dd54239bc4e701d1645cb9e456` | 驗證 webhook 推送真的來自 Telegram，寫在 `WEBHOOK_SECRET_TOKEN` |
 | 後台管理密碼 | `a123456` | 登入 `/admin` 網頁用，寫在 `ADMIN_PASSWORD` |
 | Google AI Studio (Gemini) API Key | `AQ.Ab8RN6L1AAOo15rPaF0lnlZfQph6-3zdFZ-MUJID9ATO1EyYnQ` | 原本要做「照片辨識菜單」，**這個功能後來放棄了，目前程式碼裡完全沒有用到這組 key** |
+| DATABASE_URL | Neon 給的 PostgreSQL 連線字串 | **不要寫在 `main.py` 裡**，設定成 Render 的 Environment Variable，程式用 `os.environ.get("DATABASE_URL")` 讀取。實際值請自行到 Neon 後台查看，這份文件故意不記錄實際字串，降低外流風險 |
 
 ### ⚠️ 安全性提醒
 - Bot Token 跟 Gemini API Key 都曾經直接貼在對話紀錄裡，等於已經曝光過。
@@ -43,7 +44,7 @@
 | Build Command | `pip install -r requirements.txt` |
 | Start Command | `uvicorn main:app --host 0.0.0.0 --port $PORT` |
 | Runtime | Python 3 |
-| Environment Variables | `PYTHON_VERSION` = `3.11.9`（避免新版 Python 編譯 pydantic 失敗） |
+| Environment Variables | `PYTHON_VERSION` = `3.11.9`（避免新版 Python 編譯 pydantic 失敗）<br>`DATABASE_URL` = Neon 的連線字串（讓資料庫持久化生效必須設定這個） |
 | Instance Type | Free |
 
 **Free 方案的限制**：閒置約 15 分鐘會自動休眠，有新訊息時會透過 webhook 自動喚醒，
@@ -153,10 +154,12 @@ your-repo/
 
 ## 8. 重要限制與已知行為
 
-- **資料都存在記憶體裡**：餐廳清單、菜單照片、進行中的點餐場次，
-  只要 Render 重新部署或重啟就會**全部清空**，回到程式碼裡預設的 5 間測試餐廳
-  （阿明快炒、巷口便當、涼夏冷飲、深夜燒烤、晨光早餐店，皆無照片）。
-  之後要正式長期使用、資料不能不見的話，需要接上真正的資料庫。
+- **資料庫已接上 Neon（PostgreSQL）**：餐廳清單、菜單照片、進行中的點餐場次，
+  現在都會同步寫進資料庫，Render 重新部署或重啟**不會再清空**，啟動時會自動
+  從資料庫載回記憶體。前提是 Render 的 **Environment Variables** 裡有設定
+  `DATABASE_URL`（Neon 給的連線字串，含密碼）。如果沒設定這個環境變數，
+  程式會自動退回「純記憶體」模式運作（等於還沒接資料庫前的行為），
+  不會報錯，但重啟一樣會清空。
 - Telegram 規定「web_app 型態的按鈕」只能在私訊使用，群組裡用會直接報錯，
   所以選餐廳、結束點餐都用一般的 Inline 按鈕（callback_data），不是 Mini App。
 - 點餐用的文字辨識只在「該聊天室有進行中場次、且已選好餐廳」時才會運作，
@@ -168,7 +171,6 @@ your-repo/
 
 ## 9. 之後可能的優化方向（尚未實作）
 
-- 把記憶體資料改成真正的資料庫（餐廳、菜單照片、歷史場次不會因重啟消失）
 - 輪替目前已曝光的 Bot Token 與 Gemini API Key，改用環境變數管理
 - 如果之後想加回「查看菜單品項明細」「點餐歷史」等功能，需要重新設計（先前的
   Mini App 方案在群組情境下有 Telegram 平台限制，需要用不同的技術路線）
