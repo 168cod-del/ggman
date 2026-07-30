@@ -33,7 +33,7 @@ Telegram 點餐 Bot 後端（文字點餐版）
 7. /admin 後台：新增餐廳、上傳/管理菜單照片（電腦、手機瀏覽器都可以直接上傳）、刪除餐廳
 
 嚴格的回應規則（很重要）：
-- 只有「/start /开单 /開單 /end /admin /newmenu /新增菜單 /新增菜单 /删 /删单 /删除
+- 只有「/start /开单 /開單 /end /结单 /結單 /admin /newmenu /新增菜單 /新增菜单 /删 /删单 /删除
   /刪 /刪單 /刪除」這些指令，以及「剛打完新增菜單指令的那個人所上傳的下一張照片」，
   bot 才會在任何時候回應。
 - 除此之外，只有在該聊天室「有正在進行中的點餐場次，且已選好餐廳」時，
@@ -350,9 +350,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "restaurant": None,
             "orders_by_user": {},
         }
-        initiator_name = user.full_name
-    else:
-        initiator_name = active_sessions[chat_id]["initiator_name"]
 
     # 重要：Telegram 規定「web_app 型態的按鈕」不管是 Inline 還是 Keyboard，
     # 一律只能在私訊使用，群組裡用了會直接報錯。所以選餐廳改成一般的按鈕清單
@@ -365,9 +362,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     buttons.append([InlineKeyboardButton("🛑 結束點餐（限發起人）", callback_data=END_ORDER_CALLBACK)])
 
     await update.message.reply_text(
-        f"🍽️ 點餐開始！發起人：{initiator_name}\n"
-        "發起人請從下方選一間餐廳，選好後大家直接打「品項 金額 備註」點餐即可（例：牛排X2 300 五分熟）\n"
-        "想刪除自己的訂單可以打「/删」「/删单」「/删除」",
+        "品項 金額 備註（例：牛排X2 300 五分熟）\n"
+        "/删 /删单 /删除 可刪除自己的訂單",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -382,12 +378,15 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.effective_user
     is_private = update.effective_chat.type == "private"
 
-    # 中文替代指令：不用打 /start / /newmenu，直接打這兩個也可以（繁簡都支援）
+    # 中文替代指令：不用打 /start / /newmenu / /end，直接打這幾個也可以（繁簡都支援）
     if stripped in ("/开单", "/開單"):
         await start(update, context)
         return
     if stripped.startswith("/新增菜单") or stripped.startswith("/新增菜單"):
         await new_menu(update, context)
+        return
+    if stripped in ("/结单", "/結單"):
+        await end_session(update, context)
         return
 
     # 刪除自己在本場的訂單，不用二次確認（繁簡都支援）
