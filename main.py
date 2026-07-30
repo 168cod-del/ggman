@@ -34,7 +34,7 @@ Telegram 點餐 Bot 後端（文字點餐版）
 
 嚴格的回應規則（很重要）：
 - 只有「/start /开单 /開單 /end /结单 /結單 /admin /newmenu /新增菜單 /新增菜单 /删 /删单 /删除
-  /刪 /刪單 /刪除」這些指令，以及「剛打完新增菜單指令的那個人所上傳的下一張照片」，
+  /刪 /刪單 /刪除 /delorder /help」這些指令，以及「剛打完新增菜單指令的那個人所上傳的下一張照片」，
   bot 才會在任何時候回應。
 - 除此之外，只有在該聊天室「有正在進行中的點餐場次，且已選好餐廳」時，
   bot 才會嘗試把文字訊息解析成「品項 金額 備註」的點餐內容；
@@ -378,6 +378,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def delete_my_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    session = active_sessions.get(chat_id)
+    if session and session["orders_by_user"].pop(user.id, None) is not None:
+        await update.message.reply_text("刪單成功")
+
+
+HELP_TEXT = (
+    "開單：/start 或 /开单／開單\n"
+    "選餐廳：開單後點下方按鈕\n"
+    "點餐：直接打「品項 金額 備註」，例如 牛排X2 300 五分熟\n"
+    "刪單：/delorder 或 /删／删单／删除\n"
+    "結單：/end 或 /结单／結單（限發起人）\n"
+    "新增餐廳：/newmenu 餐廳名稱 或 /新增菜單，接著上傳照片\n"
+    "後台管理：/admin"
+)
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(HELP_TEXT)
+
+
 # ------------------------------------------------------------------
 # 文字點餐（一般文字訊息）
 # ------------------------------------------------------------------
@@ -401,9 +424,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # 刪除自己在本場的訂單，不用二次確認（繁簡都支援）
     if stripped in ("/删", "/删单", "/删除", "/刪", "/刪單", "/刪除"):
-        session = active_sessions.get(chat_id)
-        if session and session["orders_by_user"].pop(user.id, None) is not None:
-            await update.message.reply_text("刪單成功")
+        await delete_my_order(update, context)
         return
 
     session = active_sessions.get(chat_id)
@@ -586,6 +607,8 @@ async def lifespan(app: FastAPI):
     telegram_app.add_handler(CommandHandler("end", end_session))
     telegram_app.add_handler(CommandHandler("admin", admin_link))
     telegram_app.add_handler(CommandHandler("newmenu", new_menu))
+    telegram_app.add_handler(CommandHandler("delorder", delete_my_order))
+    telegram_app.add_handler(CommandHandler("help", help_command))
     telegram_app.add_handler(
         CallbackQueryHandler(end_button_callback, pattern=f"^{END_ORDER_CALLBACK}$")
     )
