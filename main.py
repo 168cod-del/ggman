@@ -4,34 +4,38 @@ Telegram 點餐 Bot 後端（文字點餐版）
 這支程式同時做兩件事：
 1. Telegram Bot（webhook 模式，適合 Render 免費方案的休眠機制）
 2. 一個小型網站伺服器（FastAPI），提供：
-   - /history           「我的點餐」頁面（Mini App，本場訂單修改/刪除 + 常用紀錄快速重送，只能在私訊開啟）
-   - /admin             後台管理頁面（手動新增餐廳、編輯菜單）
+   - /admin             後台管理頁面（新增餐廳、上傳/管理菜單照片）
    - /telegram-webhook  Telegram 推送新訊息的接收端點
    - /health            保活用的健康檢查端點
-   - /api/...           給以上頁面呼叫的資料介面
+   - /api/...           給後台頁面呼叫的資料介面
 
 功能總覽：
 1. /start（或「/开单」「/開單」）
    - 該聊天室第一個發起的人 = 本場「發起人」
-   - 顯示一排餐廳按鈕（一般 Inline 按鈕，不是 Mini App）+「📋 我的點餐」「🛑 結束點餐」
+   - 顯示一排餐廳按鈕 +「🛑 結束點餐」（都是一般 Inline 按鈕，不是 Mini App）
 2. 發起人點選其中一顆餐廳按鈕，選定後會把該餐廳的菜單照片直接發到聊天室，
    讓大家對照著點餐
-3. 大家直接在聊天室打字點餐，支援兩種格式：
-   單品項：品項X數量 金額 [備註]        例：牛排X2 300 五分熟（金額可放前面或後面）
-   多品項：品項1 品項2 ... 金額1+金額2...[備註]   例：地瓜球 紅茶 30+30 少冰
-   （金額視為該品項這一行的總金額，不會再乘以數量）
+3. 大家直接在聊天室打字點餐，支援多種格式（金額必填）：
+   單品項：品項X數量 金額 [備註]              例：牛排X2 300 五分熟
+   多品項＋各自金額：品項1 品項2 金額1+金額2   例：地瓜球 紅茶 30+30 少冰
+                     品項1+品項2+品項3 金額1+金額2+金額3
+                     品項1品項1金額品項2金額...（無分隔符號也可以）
+   多品項＋共用總金額（金額需放最後）：品項1 品項2 總金額
+                     品項1 品項2＝總金額
+   （品項之間可以用 + / . 或空白分隔）
    每人每場只會保留「最新一筆」訂單，重複輸入會覆蓋前一筆
-4. 使用者可以打開「📋 我的點餐」Mini App，修改/刪除本場自己的訂單，
-   或從最近 4 筆常用紀錄快速重新送出
+4. 想刪除自己這場的訂單，直接打「/删」「/删单」「/删除」（或繁體「/刪」「/刪單」「/刪除」）
+   即可，不用二次確認，成功會回覆「刪單成功」
 5. 發起人按「🛑 結束點餐」：顯示每人明細 + 品項彙總、清除場次記憶
 6. /newmenu 餐廳名稱（或「/新增菜單 餐廳名稱」「/新增菜单 餐厅名称」）
    → bot 會請「發出這個指令的人」接著上傳一張菜單照片，
    上傳成功才算真的新增完成（不需要再打任何品項文字）
-7. /admin 後台：查看目前有哪些餐廳、有沒有菜單照片、可以刪除餐廳
+7. /admin 後台：新增餐廳、上傳/管理菜單照片（電腦、手機瀏覽器都可以直接上傳）、刪除餐廳
 
 嚴格的回應規則（很重要）：
-- 只有「/start /开单 /開單 /end /admin /newmenu /新增菜單 /新增菜单」這些指令，
-  以及「剛打完新增菜單指令的那個人所上傳的下一張照片」，bot 才會在任何時候回應。
+- 只有「/start /开单 /開單 /end /admin /newmenu /新增菜單 /新增菜单 /删 /删单 /删除
+  /刪 /刪單 /刪除」這些指令，以及「剛打完新增菜單指令的那個人所上傳的下一張照片」，
+  bot 才會在任何時候回應。
 - 除此之外，只有在該聊天室「有正在進行中的點餐場次，且已選好餐廳」時，
   bot 才會嘗試把文字訊息解析成「品項 金額 備註」的點餐內容；
   解析不出來的一般聊天一律安靜忽略，不回應、不打擾。
@@ -40,12 +44,10 @@ Telegram 點餐 Bot 後端（文字點餐版）
 注意：
 - Telegram 規定「web_app 型態的按鈕」不管是 Inline 按鈕還是 Keyboard 按鈕，
   一律只能在私訊使用，群組裡用就會直接報錯（BadRequest）。
-  所以「選餐廳」改成一般的 Inline 按鈕清單（callback_data 類型，沒有這個限制），
-  不用 Mini App 也能限定只有發起人選擇有效；
-  「📋 我的點餐」因為需要辨識個人身份，只能在私訊開啟，
-  群組裡看到的是一顆會跳轉到私訊的一般連結按鈕（url 類型，同樣不受此限制）。
-- 場次記憶、餐廳/菜單資料、使用者個人歷史、新增菜單的暫存狀態，
-  目前都存在「記憶體」裡，這支程式一重啟（Render 重新部署）就會清空。
+  所以「選餐廳」用一般的 Inline 按鈕清單（callback_data 類型，沒有這個限制），
+  不用 Mini App 也能限定只有發起人選擇有效。
+- 場次記憶、餐廳/菜單資料、新增菜單的暫存狀態，目前都存在「記憶體」裡，
+  這支程式一重啟（Render 重新部署）就會清空。
   等之後要正式上線、資料不能不見的話，要幫你接上真正的資料庫。
 - 因為點餐是直接看群組裡的文字訊息辨識，
   bot 必須關閉 Telegram 的隱私模式（BotFather → /setprivacy → Disable），
@@ -55,16 +57,11 @@ Telegram 點餐 Bot 後端（文字點餐版）
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
 import io
-import json
 import logging
 import re
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -75,7 +72,6 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputFile,
-    WebAppInfo,
 )
 from telegram.ext import (
     Application,
@@ -110,8 +106,6 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR  # html 檔案跟 main.py 放同一層
 
-BOT_USERNAME = ""  # 啟動時會自動抓取，用來組「跳轉到私訊」的連結
-
 
 # ------------------------------------------------------------------
 # 資料儲存（記憶體版本）
@@ -145,9 +139,6 @@ pending_menu_uploads: dict[int, str] = {}
 #   } },
 # } }
 active_sessions: dict[int, dict] = {}
-
-# user_history: { user_id: [ {"raw_text","items","note","total"}, ... ] }（最多留 4 筆，最新在前）
-user_history: dict[int, list[dict]] = {}
 
 END_ORDER_CALLBACK = "end_order"
 SELECT_RESTAURANT_PREFIX = "select_restaurant:"
@@ -286,7 +277,7 @@ def record_order(
     raw_text: str,
     total_override=None,
 ):
-    """把解析好的訂單記錄進場次（同一人重複點餐會覆蓋前一筆），並存進個人歷史。
+    """把解析好的訂單記錄進場次（同一人重複點餐會覆蓋前一筆）。
     回傳要貼回聊天室的單行摘要文字；若場次不存在或餐廳未選，回傳 None。"""
     session = active_sessions.get(chat_id)
     if not session or not session.get("restaurant"):
@@ -302,10 +293,6 @@ def record_order(
         "raw_text": raw_text,
     }
     session["orders_by_user"][user_id] = order_record
-
-    history = [h for h in user_history.get(user_id, []) if h["raw_text"] != raw_text]
-    history.insert(0, {"raw_text": raw_text, "items": items, "note": note, "total": total})
-    user_history[user_id] = history[:4]
 
     return build_order_line(user_name, order_record)
 
@@ -350,60 +337,11 @@ def build_final_summary(session: dict) -> str:
 
 
 # ------------------------------------------------------------------
-# Telegram initData 驗證
-# ------------------------------------------------------------------
-def validate_init_data(init_data: str, bot_token: str, max_age_seconds: int = 86400):
-    if not init_data:
-        return None
-    try:
-        parsed = dict(parse_qsl(init_data, strict_parsing=True))
-    except ValueError:
-        return None
-
-    received_hash = parsed.pop("hash", None)
-    if not received_hash:
-        return None
-
-    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-    secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-    computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
-    if not hmac.compare_digest(computed_hash, received_hash):
-        return None
-
-    auth_date = int(parsed.get("auth_date", 0))
-    if time.time() - auth_date > max_age_seconds:
-        return None
-
-    user_json = parsed.get("user")
-    user = json.loads(user_json) if user_json else None
-    return {"user": user, "auth_date": auth_date}
-
-
-def require_telegram_user(x_telegram_init_data: str) -> dict:
-    validated = validate_init_data(x_telegram_init_data, BOT_TOKEN)
-    if not validated or not validated.get("user"):
-        raise HTTPException(401, "無法驗證身份，請透過 Telegram 開啟此頁面")
-    return validated["user"]
-
-
-# ------------------------------------------------------------------
 # /start
 # ------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = update.effective_user
-    is_private = update.effective_chat.type == "private"
-
-    # 深連結：從群組的「📋 我的點餐」按鈕跳轉過來的私訊，直接開啟那場的我的點餐頁面
-    if is_private and context.args and context.args[0].startswith("history_"):
-        target_chat_id = context.args[0][len("history_"):]
-        history_url = f"{BASE_URL}/history?chat_id={target_chat_id}"
-        markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📋 我的點餐", web_app=WebAppInfo(url=history_url))]]
-        )
-        await update.message.reply_text("點下方按鈕查看／修改你在那場點餐的訂單：", reply_markup=markup)
-        return
 
     if chat_id not in active_sessions:
         active_sessions[chat_id] = {
@@ -420,26 +358,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 一律只能在私訊使用，群組裡用了會直接報錯。所以選餐廳改成一般的按鈕清單
     # （callback_data 類型，沒有這個限制），不用 Mini App 也能做到限定發起人選擇。
     restaurant_names = list(restaurants.keys())
-    restaurant_buttons = [
+    buttons = [
         [InlineKeyboardButton(name, callback_data=f"{SELECT_RESTAURANT_PREFIX}{name}")]
         for name in restaurant_names
     ]
+    buttons.append([InlineKeyboardButton("🛑 結束點餐（限發起人）", callback_data=END_ORDER_CALLBACK)])
 
     await update.message.reply_text(
         f"🍽️ 點餐開始！發起人：{initiator_name}\n"
-        "發起人請從下方選一間餐廳，選好後大家直接打「品項 金額 備註」點餐即可（例：牛排X2 300 五分熟）",
-        reply_markup=InlineKeyboardMarkup(restaurant_buttons) if restaurant_buttons else None,
+        "發起人請從下方選一間餐廳，選好後大家直接打「品項 金額 備註」點餐即可（例：牛排X2 300 五分熟）\n"
+        "想刪除自己的訂單可以打「/删」「/删单」「/删除」",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
-
-    # 「我的點餐」需要辨識個人身份，只能在私訊開啟，這裡放一顆連結按鈕跳轉過去
-    history_link = f"https://t.me/{BOT_USERNAME}?start=history_{chat_id}"
-    inline_markup = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📋 我的點餐（將跳轉私訊）", url=history_link)],
-            [InlineKeyboardButton("🛑 結束點餐（限發起人）", callback_data=END_ORDER_CALLBACK)],
-        ]
-    )
-    await update.message.reply_text("查看/修改自己的訂單，或結束這場點餐：", reply_markup=inline_markup)
 
 
 # ------------------------------------------------------------------
@@ -448,6 +378,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.effective_message.text or ""
     stripped = text.strip()
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    is_private = update.effective_chat.type == "private"
 
     # 中文替代指令：不用打 /start / /newmenu，直接打這兩個也可以（繁簡都支援）
     if stripped in ("/开单", "/開單"):
@@ -457,9 +390,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await new_menu(update, context)
         return
 
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    is_private = update.effective_chat.type == "private"
+    # 刪除自己在本場的訂單，不用二次確認（繁簡都支援）
+    if stripped in ("/删", "/删单", "/删除", "/刪", "/刪單", "/刪除"):
+        session = active_sessions.get(chat_id)
+        if session and session["orders_by_user"].pop(user.id, None) is not None:
+            await update.message.reply_text("刪單成功")
+        return
 
     session = active_sessions.get(chat_id)
     if not session or not session.get("restaurant"):
@@ -653,10 +589,6 @@ async def lifespan(app: FastAPI):
 
     await telegram_app.initialize()
 
-    global BOT_USERNAME
-    me = await telegram_app.bot.get_me()
-    BOT_USERNAME = me.username
-
     await telegram_app.bot.set_webhook(
         url=f"{BASE_URL}/telegram-webhook",
         secret_token=WEBHOOK_SECRET_TOKEN,
@@ -718,11 +650,6 @@ async def health():
 
 # ---------------- 頁面 ----------------
 
-@app.get("/history")
-async def history_page():
-    return FileResponse(STATIC_DIR / "history.html")
-
-
 @app.get("/admin")
 async def admin_page():
     return FileResponse(STATIC_DIR / "admin.html")
@@ -748,101 +675,6 @@ async def api_get_session(chat_id: int):
     if not session:
         return {"active": False}
     return {"active": True, "restaurant": session["restaurant"]}
-
-
-# ---------------- 我的點餐 API ----------------
-
-@app.get("/api/session/{chat_id}/my-order")
-async def api_get_my_order(chat_id: int, x_telegram_init_data: str = Header(default="")):
-    tg_user = require_telegram_user(x_telegram_init_data)
-    session = active_sessions.get(chat_id)
-    if not session:
-        return {"active": False, "order": None}
-    record = session["orders_by_user"].get(tg_user["id"])
-    return {"active": True, "order": record}
-
-
-class UpsertOrderBody(BaseModel):
-    raw_text: str
-
-
-@app.post("/api/session/{chat_id}/my-order")
-async def api_upsert_my_order(
-    chat_id: int, body: UpsertOrderBody, x_telegram_init_data: str = Header(default="")
-):
-    tg_user = require_telegram_user(x_telegram_init_data)
-    session = active_sessions.get(chat_id)
-    if not session or not session.get("restaurant"):
-        raise HTTPException(404, "目前沒有進行中的點餐，或發起人還沒選餐廳")
-
-    parsed = parse_order_text(body.raw_text)
-    if parsed is None or parsed == "MISMATCH":
-        raise HTTPException(400, "格式錯誤，請重新輸入（需包含品項與金額）")
-
-    items, note, total_override = parsed
-    user_name = tg_user.get("first_name", "") + (
-        f" {tg_user['last_name']}" if tg_user.get("last_name") else ""
-    )
-    summary = record_order(
-        chat_id, tg_user["id"], user_name.strip() or "使用者", items, note, body.raw_text, total_override
-    )
-
-    if summary and telegram_app:
-        await telegram_app.bot.send_message(chat_id=chat_id, text=f"✏️ {summary}")
-
-    return {"ok": True}
-
-
-@app.post("/api/session/{chat_id}/my-order/delete")
-async def api_delete_my_order(chat_id: int, x_telegram_init_data: str = Header(default="")):
-    tg_user = require_telegram_user(x_telegram_init_data)
-    session = active_sessions.get(chat_id)
-    if not session:
-        raise HTTPException(404, "目前沒有進行中的點餐")
-
-    record = session["orders_by_user"].pop(tg_user["id"], None)
-    if record and telegram_app:
-        await telegram_app.bot.send_message(
-            chat_id=chat_id, text=f"❌ {record['user_name']} 已取消訂單"
-        )
-    return {"ok": True}
-
-
-@app.get("/api/my-history")
-async def api_get_my_history(x_telegram_init_data: str = Header(default="")):
-    tg_user = require_telegram_user(x_telegram_init_data)
-    return {"history": user_history.get(tg_user["id"], [])}
-
-
-class ReorderBody(BaseModel):
-    raw_text: str
-
-
-@app.post("/api/session/{chat_id}/order-from-history")
-async def api_order_from_history(
-    chat_id: int, body: ReorderBody, x_telegram_init_data: str = Header(default="")
-):
-    tg_user = require_telegram_user(x_telegram_init_data)
-    session = active_sessions.get(chat_id)
-    if not session or not session.get("restaurant"):
-        raise HTTPException(404, "目前沒有進行中的點餐，或發起人還沒選餐廳")
-
-    parsed = parse_order_text(body.raw_text)
-    if parsed is None or parsed == "MISMATCH":
-        raise HTTPException(400, "這筆歷史紀錄格式異常，無法重新送出")
-
-    items, note, total_override = parsed
-    user_name = tg_user.get("first_name", "") + (
-        f" {tg_user['last_name']}" if tg_user.get("last_name") else ""
-    )
-    summary = record_order(
-        chat_id, tg_user["id"], user_name.strip() or "使用者", items, note, body.raw_text, total_override
-    )
-
-    if summary and telegram_app:
-        await telegram_app.bot.send_message(chat_id=chat_id, text=summary)
-
-    return {"ok": True}
 
 
 # ---------------- 後台管理 API（需要密碼） ----------------
