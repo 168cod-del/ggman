@@ -27,9 +27,12 @@ Telegram 點餐 Bot 後端（簡化版：純文字點餐，沒有餐廳/菜單�
 4. 發起人按「🛑 結束點餐」（或打 /end、/结单、/結單）：
    顯示每人明細 + 品項彙總 + 合計金額、清除場次記憶
 5. /help：查看使用說明
+6. /forceclear（或「/强制清除」「/強制清除」）：**緊急用**，會一次清除「所有」
+   群組正在進行中的點餐場次（不只當下這個群組），適合場次卡住或測試時使用，
+   請小心使用，沒有二次確認
 
 嚴格的回應規則（很重要）：
-- 只有「/start /开单 /開單 /end /结单 /結單 /delorder /help
+- 只有「/start /开单 /開單 /end /结单 /結單 /delorder /help /forceclear /强制清除 /強制清除
   /删 /删单 /删除 /刪 /刪單 /刪除」這些指令，bot 才會在任何時候回應。
 - 除此之外，只有在該聊天室「有正在進行中的點餐場次」時，
   bot 才會嘗試把文字訊息解析成「品項 金額 備註」的點餐內容；
@@ -184,6 +187,15 @@ async def db_delete_session(chat_id: int):
         await db_pool.execute("DELETE FROM sessions WHERE chat_id = $1", chat_id)
     except Exception:
         logger.exception("從資料庫刪除場次失敗")
+
+
+async def db_clear_all_sessions():
+    if not db_pool:
+        return
+    try:
+        await db_pool.execute("DELETE FROM sessions")
+    except Exception:
+        logger.exception("從資料庫清空所有場次失敗")
 
 
 # ------------------------------------------------------------------
@@ -415,6 +427,15 @@ async def delete_my_order(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("刪單成功")
 
 
+async def force_clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # 注意：這個指令會清掉「所有」群組正在進行中的點餐場次，不是只有這個群組，
+    # 是給緊急重置（例如場次卡住、測試用）使用，請小心使用。
+    count = len(active_sessions)
+    active_sessions.clear()
+    await db_clear_all_sessions()
+    await update.message.reply_text(f"⚠️ 已強制清除所有進行中的點餐場次（共 {count} 場）")
+
+
 HELP_TEXT = (
     "開單：/start 或 /开单／開單\n"
     "刪單：/delorder 或 /删／删单／删除\n"
@@ -448,6 +469,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if stripped in ("/结单", "/結單"):
         await end_session(update, context)
+        return
+    if stripped in ("/强制清除", "/強制清除"):
+        await force_clear_all(update, context)
         return
 
     # 刪除自己在本場的訂單，不用二次確認（繁簡都支援）
@@ -542,6 +566,7 @@ async def lifespan(app: FastAPI):
     telegram_app.add_handler(CommandHandler("end", end_session))
     telegram_app.add_handler(CommandHandler("delorder", delete_my_order))
     telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("forceclear", force_clear_all))
     telegram_app.add_handler(
         CallbackQueryHandler(end_button_callback, pattern=f"^{END_ORDER_CALLBACK}$")
     )
