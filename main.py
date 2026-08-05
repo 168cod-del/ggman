@@ -21,7 +21,7 @@ Telegram 點餐 Bot 後端（簡化版：純文字點餐，沒有餐廳/菜單�
    多品項＋共用總金額（金額需放最後）：品項1 品項2 總金額
                      品項1 品項2＝總金額
    （品項之間可以用 + / . 、 或空白分隔）
-   每人每場只會保留「最新一筆」訂單，重複輸入會覆蓋前一筆
+   每人可以分好幾次輸入，bot 會自動把同名品項加總數量與金額、彙整成一筆
 3. 想刪除自己這場的訂單，直接打「/删」「/删单」「/删除」（或繁體「/刪」「/刪單」「/刪除」）
    或正式指令 /delorder 皆可，不用二次確認，成功會回覆「刪單成功」
 4. 發起人按「🛑 結束點餐」（或打 /end、/结单、/結單）：
@@ -260,6 +260,28 @@ def parse_order_text(text: str):
             left, right = left.strip(), right.strip()
             if not left or not re.fullmatch(r"\d+(\.\d+)?", right):
                 return "MISMATCH"
+
+            if re.search(r"\d", left):
+                # 「＝」左邊本身就是「品項 金額 品項 金額」這種各自標價的寫法，
+                # 例如「鴨肉羹麵 80 豆干 30 =110」，要拆成各自的品項+金額，
+                # 不能把 80、30 這種數字誤判成品項名稱。後面的 =總額
+                # 當作使用者自己核對用的總金額，不特別使用（以各自金額加總為準）。
+                pairs = list(re.finditer(r"([^\d]+?)(\d+(?:\.\d+)?)", left))
+                if not pairs or pairs[0].start() != 0 or left[pairs[-1].end():].strip():
+                    return "MISMATCH"
+                items = [
+                    {
+                        "name": m.group(1).strip(),
+                        "qty": 1,
+                        "price": float(m.group(2)) if "." in m.group(2) else int(m.group(2)),
+                    }
+                    for m in pairs if m.group(1).strip()
+                ]
+                if not items:
+                    return "MISMATCH"
+                return (items, "", None)
+
+            # 「＝」左邊是純品項名稱清單（沒有數字），例如「牛肉麵、豬頭皮、酸菜＝90」
             names = [n for n in re.split(r"[+/.、\s]+", left) if n]
             if not names:
                 return "MISMATCH"
@@ -333,7 +355,8 @@ async def record_order(
     raw_text: str,
     total_override=None,
 ):
-    """把解析好的訂單記錄進場次（同一人重複點餐會覆蓋前一筆）。
+    """把解析好的訂單記錄進場次。同一人重複點餐時會自動跟先前的訂單合併——
+    同名品項加總數量與金額、備註接在後面、總金額累加，不是整筆覆蓋掉。
     回傳要貼回聊天室的單行摘要文字；若場次不存在，回傳 None。"""
     session = active_sessions.get(chat_id)
     if not session:
@@ -341,13 +364,35 @@ async def record_order(
 
     total = total_override if total_override is not None else sum(item["price"] for item in items)
 
-    order_record = {
-        "user_name": user_name,
-        "items": items,
-        "note": note,
-        "total": total,
-        "raw_text": raw_text,
-    }
+    existing = session["orders_by_user"].get(user_id)
+    if existing:
+        merged_items: dict[str, dict] = {it["name"]: dict(it) for it in existing["items"]}
+        for it in items:
+            if it["name"] in merged_items:
+                merged_items[it["name"]]["qty"] += it["qty"]
+                merged_items[it["name"]]["price"] += it["price"]
+            else:
+                merged_items[it["name"]] = dict(it)
+
+        note_parts = [p for p in (existing.get("note"), note) if p]
+        combined_note = "、".join(dict.fromkeys(note_parts))  # 去重複但保留順序
+
+        order_record = {
+            "user_name": user_name,
+            "items": list(merged_items.values()),
+            "note": combined_note,
+            "total": existing["total"] + total,
+            "raw_text": existing["raw_text"] + "\n" + raw_text,
+        }
+    else:
+        order_record = {
+            "user_name": user_name,
+            "items": items,
+            "note": note,
+            "total": total,
+            "raw_text": raw_text,
+        }
+
     session["orders_by_user"][user_id] = order_record
     await db_upsert_session(chat_id, session)
 
@@ -439,7 +484,8 @@ async def force_clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 HELP_TEXT = (
     "開單：/start 或 /开单／開單\n"
     "刪單：/delorder 或 /删／删单／删除\n"
-    "結單：/end 或 /结单／結單（限發起人）\n\n"
+    "結單：/end 或 /结单／結單（限發起人）\n"
+    "⚠️緊急清除所有場次：/forceclear 或 /强制清除／強制清除\n\n"
     "點餐格式（金額必填，品項之間可用 + / . 、 或空白分隔）：\n"
     "單品項：牛排X2 300 五分熟\n"
     "多品項各自金額：地瓜球 紅茶 30+30 少冰\n"
